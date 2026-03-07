@@ -118,18 +118,43 @@ Health check. No auth required.
 ---
 
 ### `POST /events/search`
-Main search endpoint. Passes filters through Claude, then queries BigQuery.
+Main search endpoint. Free-text filters are normalized through Claude, structured filters are applied directly, then the backend queries BigQuery.
 
 **Request body** — at least one field required:
 ```json
 {
   "country": "Italy",
+  "countries": ["France", "Germany"],
   "event_type": "protest",
   "macro_topic": "economy",
   "date_range": {
     "from": 2022,
     "to": 2024
-  }
+  },
+  "sentiment": {
+    "tone_min": -5,
+    "tone_max": 1,
+    "goldstein_min": -10,
+    "goldstein_max": 2
+  },
+  "impact": {
+    "min_mentions": 10,
+    "min_sources": 2,
+    "min_articles": 4
+  },
+  "actors": {
+    "actor1_country": "USA",
+    "actor2_country": "Italy"
+  },
+  "source": {
+    "domains": ["ansa.it", "reuters.com"]
+  },
+  "event_codes": {
+    "root_codes": ["14"],
+    "base_codes": ["141"],
+    "full_codes": ["1411"]
+  },
+  "quad_classes": [3, 4]
 }
 ```
 
@@ -140,8 +165,21 @@ Main search endpoint. Passes filters through Claude, then queries BigQuery.
   "filters_normalized": {
     "cameo_country_code": "ITA",
     "fips_country_code": "IT",
+    "geo_country_codes": ["FR", "DE", "IT"],
+    "actor1_country_code": "USA",
+    "actor2_country_code": "ITA",
     "event_root_codes": ["14"],
-    "event_base_codes": [],
+    "event_base_codes": ["141"],
+    "event_codes": ["1411"],
+    "quad_classes": [3, 4],
+    "source_domains": ["ansa.it", "reuters.com"],
+    "tone_min": -5,
+    "tone_max": 1,
+    "goldstein_min": -10,
+    "goldstein_max": 2,
+    "min_mentions": 10,
+    "min_sources": 2,
+    "min_articles": 4,
     "date_from_sqldate": 20220101,
     "date_to_sqldate": 20241231,
     "normalization_notes": "Mapped Italy → ITA/IT, protest → CAMEO root 14"
@@ -187,18 +225,121 @@ Main search endpoint. Passes filters through Claude, then queries BigQuery.
 | `fips_country_code` | 2-letter FIPS code (e.g. `IT`, `US`) — differs from ISO alpha-2 |
 | `cameo_country_code` | 3-letter CAMEO code (e.g. `ITA`, `USA`) — differs from ISO alpha-3 |
 
+#### Supported filters in detail
+
+The backend supports two filter families:
+
+- **Free-text filters** — interpreted by Claude and translated into GDELT-compatible codes
+- **Structured filters** — validated and applied directly to BigQuery without LLM interpretation
+
+##### Free-text filters (Claude-powered)
+
+These are useful when the frontend wants to keep the UI flexible and let users type natural language.
+
+| Field | Type | Example | What it does |
+|---|---|---|---|
+| `country` | `string` | `"Italy"`, `"Italia"`, `"United States"` | Claude maps it to `cameo_country_code` and `fips_country_code` |
+| `event_type` | `string` | `"protest"`, `"war"`, `"sanctions"` | Claude maps it to one or more CAMEO root/base codes |
+| `macro_topic` | `string` | `"energy"`, `"climate"`, `"migration"` | Claude infers the most relevant event categories |
+
+Notes:
+- `country` affects both actor-country filtering and geographic-country filtering
+- `event_type` and `macro_topic` are merged with any direct `event_codes` supplied by the UI
+- these fields are cached in PostgreSQL, so repeated searches do not keep calling Claude
+
+##### Structured filters (direct BigQuery filters)
+
+These are deterministic and do not require Claude.
+
+| Field | Type | Example | BigQuery effect |
+|---|---|---|---|
+| `countries` | `string[]` | `["France", "Germany"]` | Filters `ActionGeo_CountryCode` using normalized FIPS codes |
+| `date_range` | `{from,to}` | `{ "from": 2022, "to": 2024 }` | Filters `SQLDATE` between `YYYY0101` and `YYYY1231` |
+| `sentiment.tone_min` | `number` | `-5` | `AvgTone >= tone_min` |
+| `sentiment.tone_max` | `number` | `1` | `AvgTone <= tone_max` |
+| `sentiment.goldstein_min` | `number` | `-10` | `GoldsteinScale >= goldstein_min` |
+| `sentiment.goldstein_max` | `number` | `2` | `GoldsteinScale <= goldstein_max` |
+| `impact.min_mentions` | `integer` | `10` | `NumMentions >= min_mentions` |
+| `impact.min_sources` | `integer` | `2` | `NumSources >= min_sources` |
+| `impact.min_articles` | `integer` | `4` | `NumArticles >= min_articles` |
+| `actors.actor1_country` | `string` | `"USA"` | Filters `Actor1CountryCode` using normalized CAMEO codes |
+| `actors.actor2_country` | `string` | `"Italy"` | Filters `Actor2CountryCode` using normalized CAMEO codes |
+| `source.domains` | `string[]` | `["ansa.it", "reuters.com"]` | Filters by domain extracted from `SOURCEURL` |
+| `event_codes.root_codes` | `string[]` | `["14"]` | Filters `EventRootCode` |
+| `event_codes.base_codes` | `string[]` | `["141"]` | Filters `EventBaseCode` |
+| `event_codes.full_codes` | `string[]` | `["1411"]` | Filters `EventCode` |
+| `quad_classes` | `integer[]` | `[3, 4]` | Filters `QuadClass` |
+
+##### How mixed filters behave
+
+You can combine free-text and structured filters in the same request.
+
+Example:
+```json
+{
+  "country": "Italy",
+  "event_type": "protest",
+  "countries": ["France", "Germany"],
+  "actors": { "actor1_country": "USA" },
+  "sentiment": { "tone_min": -5 },
+  "source": { "domains": ["ansa.it"] },
+  "event_codes": { "full_codes": ["141"] },
+  "quad_classes": [3]
+}
+```
+
+Behavior:
+- Claude interprets `country` and `event_type`
+- the backend merges those interpreted codes with the explicit structured filters
+- all resulting filters are applied in a single BigQuery query
+
+##### Validation rules
+
+- at least one filter must be present
+- `date_range.from` must be `<= date_range.to`
+- `sentiment.tone_min` must be `<= sentiment.tone_max`
+- `sentiment.goldstein_min` must be `<= sentiment.goldstein_max`
+- `quad_classes` should use GDELT values `1`, `2`, `3`, `4`
+- `MAX_BQ_SCAN_DAYS` still applies: very wide date windows are rejected as a cost guard
+
+##### Suggested UI mapping
+
+For a globe-based frontend, a practical UI setup is:
+
+- **Search / natural language**: `country`, `event_type`, `macro_topic`
+- **Geography**: `countries`
+- **Time**: `date_range`
+- **Sentiment**: `sentiment.tone_*`, `sentiment.goldstein_*`
+- **Impact**: `impact.min_mentions`, `impact.min_sources`, `impact.min_articles`
+- **Actors**: `actors.actor1_country`, `actors.actor2_country`
+- **Categories**: `event_codes.*`, `quad_classes`
+- **Source filtering**: `source.domains`
+
 ---
 
 ### `POST /filters/interpret`
-Dry-run: normalizes filters via Claude and returns the GDELT query parameters **without** querying BigQuery. Useful for frontend filter preview.
+Dry-run: normalizes filters and returns the final GDELT query parameters **without** querying BigQuery. Useful for frontend filter preview.
 
 Same request body as `/events/search`. Response is just `filters_normalized`:
 ```json
 {
   "cameo_country_code": "ITA",
   "fips_country_code": "IT",
+  "geo_country_codes": ["IT", "FR"],
+  "actor1_country_code": "USA",
+  "actor2_country_code": null,
   "event_root_codes": ["14"],
-  "event_base_codes": [],
+  "event_base_codes": ["141"],
+  "event_codes": ["1411"],
+  "quad_classes": [3],
+  "source_domains": ["ansa.it"],
+  "tone_min": -5,
+  "tone_max": null,
+  "goldstein_min": null,
+  "goldstein_max": 2,
+  "min_mentions": 10,
+  "min_sources": 2,
+  "min_articles": 4,
   "date_from_sqldate": 20220101,
   "date_to_sqldate": 20241231,
   "normalization_notes": "..."

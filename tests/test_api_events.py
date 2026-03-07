@@ -68,6 +68,12 @@ async def test_search_events_success(async_client, api_headers, anthropic_mock_s
             "event_type": "protest",
             "macro_topic": "energy",
             "date_range": {"from": 2018, "to": 2024},
+            "sentiment": {"tone_min": -5},
+            "impact": {"min_mentions": 3},
+            "actors": {"actor1_country": "USA"},
+            "source": {"domains": ["ansa.it"]},
+            "event_codes": {"full_codes": ["141"]},
+            "quad_classes": [3],
         },
         headers=api_headers,
     )
@@ -87,6 +93,13 @@ async def test_search_events_success(async_client, api_headers, anthropic_mock_s
     normalized = data["filters_normalized"]
     assert normalized["cameo_country_code"] == "ITA"
     assert normalized["fips_country_code"] == "IT"
+    assert normalized["geo_country_codes"] == ["IT"]
+    assert normalized["actor1_country_code"] == "USA"
+    assert normalized["source_domains"] == ["ansa.it"]
+    assert normalized["event_codes"] == ["141"]
+    assert normalized["quad_classes"] == [3]
+    assert normalized["tone_min"] == -5
+    assert normalized["min_mentions"] == 3
     assert "14" in normalized["event_root_codes"]
 
     # Check results

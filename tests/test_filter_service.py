@@ -127,3 +127,49 @@ async def test_normalize_filters_anthropic_unavailable_propagates(db_session):
 
     with pytest.raises(AnthropicUnavailableError):
         await normalize_filters(raw, db_session, client)
+
+
+async def test_normalize_structured_filters_without_claude(db_session):
+    """Structured filters should bypass Claude and normalize locally."""
+    raw = RawFilterInput(
+        countries=["Italy", "France"],
+        date_range=DateRange(**{"from": 2023, "to": 2024}),
+        sentiment={
+            "tone_min": -5,
+            "goldstein_max": 2,
+        },
+        impact={
+            "min_mentions": 10,
+            "min_sources": 2,
+        },
+        actors={
+            "actor1_country": "USA",
+            "actor2_country": "Italy",
+        },
+        source={"domains": ["https://www.ansa.it", "reuters.com"]},
+        event_codes={
+            "root_codes": ["14"],
+            "base_codes": ["141"],
+            "full_codes": ["1411"],
+        },
+        quad_classes=[3, 4],
+    )
+    client = AsyncMock()
+
+    result = await normalize_filters(raw, db_session, client)
+
+    assert result.geo_country_codes == ["FR", "IT"]
+    assert result.actor1_country_code == "USA"
+    assert result.actor2_country_code == "ITA"
+    assert result.source_domains == ["ansa.it", "reuters.com"]
+    assert result.event_root_codes == ["14"]
+    assert result.event_base_codes == ["141"]
+    assert result.event_codes == ["1411"]
+    assert result.quad_classes == [3, 4]
+    assert result.tone_min == -5
+    assert result.goldstein_max == 2
+    assert result.min_mentions == 10
+    assert result.min_sources == 2
+    assert result.date_from_sqldate == 20230101
+    assert result.date_to_sqldate == 20241231
+    assert client.messages.create.call_count == 0

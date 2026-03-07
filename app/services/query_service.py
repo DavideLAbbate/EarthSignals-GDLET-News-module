@@ -47,9 +47,22 @@ async def search_events(
         date_from_sqldate=normalized_filters.date_from_sqldate,
         date_to_sqldate=normalized_filters.date_to_sqldate,
         fips_country_code=normalized_filters.fips_country_code,
+        geo_country_codes=normalized_filters.geo_country_codes or None,
         cameo_country_code=normalized_filters.cameo_country_code,
+        actor1_country_code=normalized_filters.actor1_country_code,
+        actor2_country_code=normalized_filters.actor2_country_code,
         event_root_codes=normalized_filters.event_root_codes or None,
         event_base_codes=normalized_filters.event_base_codes or None,
+        event_codes=normalized_filters.event_codes or None,
+        quad_classes=normalized_filters.quad_classes or None,
+        source_domains=normalized_filters.source_domains or None,
+        tone_min=normalized_filters.tone_min,
+        tone_max=normalized_filters.tone_max,
+        goldstein_min=normalized_filters.goldstein_min,
+        goldstein_max=normalized_filters.goldstein_max,
+        min_mentions=normalized_filters.min_mentions,
+        min_sources=normalized_filters.min_sources,
+        min_articles=normalized_filters.min_articles,
         max_results=settings.bq_max_results,
     )
 
@@ -57,8 +70,10 @@ async def search_events(
         "gdelt_query_start",
         date_from=normalized_filters.date_from_sqldate,
         date_to=normalized_filters.date_to_sqldate,
-        fips_country=normalized_filters.fips_country_code,
+        geo_countries=normalized_filters.geo_country_codes,
         event_root_codes=normalized_filters.event_root_codes,
+        event_codes=normalized_filters.event_codes,
+        source_domains=normalized_filters.source_domains,
     )
 
     rows = await bq_client.run_query(sql, params)
