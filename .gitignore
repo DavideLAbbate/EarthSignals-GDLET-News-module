@@ -1,0 +1,79 @@
+# ── Secrets & credentials ─────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.json
+!package.json
+# GCP service account keys (by directory)
+bigQuery/
+gcp-key.json/
+/run/secrets/
+
+# ── Python ────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+var/
+sdist/
+develop-eggs/
+.installed.cfg
+lib/
+lib64/
+wheels/
+
+# ── Virtual environments ───────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+.env.bak
+
+# ── Testing & coverage ────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+.hypothesis/
+test.db
+
+# ── Ruff / linting ────────────────────────────────────────────────────────
+.ruff_cache/
+
+# ── Type checking ─────────────────────────────────────────────────────────
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pytype/
+
+# ── IDEs ──────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ── Docker ────────────────────────────────────────────────────────────────
+# (docker-compose.yml and Dockerfile are committed)
+docker-compose.override.yml
+
+# ── Database ──────────────────────────────────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+
+# ── Logs ──────────────────────────────────────────────────────────────────
+*.log
+logs/

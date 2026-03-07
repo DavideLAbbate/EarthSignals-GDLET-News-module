@@ -1,0 +1,63 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "gdelt-news-backend"
+version = "1.0.0"
+description = "Production FastAPI backend integrating GDELT 2.0 via BigQuery with Anthropic filter normalization"
+requires-python = ">=3.11"
+
+dependencies = [
+    # Web framework
+    "fastapi==0.115.6",
+    "uvicorn[standard]==0.32.1",
+
+    # Google BigQuery
+    "google-cloud-bigquery==3.27.0",
+    "google-auth==2.37.0",
+
+    # Anthropic
+    "anthropic==0.40.0",
+
+    # Database
+    "sqlalchemy[asyncio]==2.0.36",
+    "asyncpg==0.30.0",
+    "alembic==1.14.0",
+
+    # Scheduler
+    "apscheduler==3.10.4",
+
+    # Rate limiting
+    "slowapi==0.1.9",
+
+    # Logging
+    "structlog==24.4.0",
+
+    # Config
+    "pydantic-settings==2.6.1",
+    "pydantic==2.10.3",
+
+    # Utilities
+    "python-multipart==0.0.19",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.3.4",
+    "pytest-asyncio==0.24.0",
+    "pytest-mock==3.14.0",
+    "httpx==0.28.1",
+    "anyio==4.7.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
