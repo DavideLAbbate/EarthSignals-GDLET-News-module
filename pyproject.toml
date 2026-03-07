@@ -49,6 +49,7 @@ dev = [
     "pytest-mock==3.14.0",
     "httpx==0.28.1",
     "anyio==4.7.0",
+    "aiosqlite==0.22.1",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -56,6 +57,7 @@ packages = ["app"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 
 [tool.ruff]

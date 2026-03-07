@@ -33,8 +33,8 @@ def test_build_events_query_basic():
     assert "SELECT" in sql
     assert "GLOBALEVENTID" in sql
     assert "SOURCEURL" in sql
-    # Should NOT contain country or event code filters
-    assert "ActionGeo_CountryCode" not in sql
+    # Should NOT contain optional WHERE filters
+    assert "ActionGeo_CountryCode = @fips_country_code" not in sql
     assert "EventRootCode IN UNNEST" not in sql
 
 
