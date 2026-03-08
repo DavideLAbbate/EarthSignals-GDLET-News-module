@@ -55,6 +55,7 @@ class Settings(BaseSettings):
     app_env: str = Field(default="production")
 
     # ── Scheduler ────────────────────────────────────────────────────────
+    enable_metadata_sync: bool = Field(default=True)
     sync_interval_minutes: int = Field(default=15, ge=1, le=60)
 
     # ── Event Store / Ingestion ──────────────────────────────────────────

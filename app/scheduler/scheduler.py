@@ -66,19 +66,22 @@ def add_sync_job(scheduler: AsyncIOScheduler, bq_client) -> None:
     settings = get_settings()
     session_factory = _get_session_factory()
 
-    scheduler.add_job(
-        run_gdelt_sync,
-        trigger="interval",
-        minutes=settings.sync_interval_minutes,
-        id="gdelt_sync",
-        max_instances=1,
-        replace_existing=True,
-        kwargs={"bq_client": bq_client},
-    )
-    logger.info(
-        "sync_job_registered",
-        interval_minutes=settings.sync_interval_minutes,
-    )
+    if settings.enable_metadata_sync:
+        scheduler.add_job(
+            run_gdelt_sync,
+            trigger="interval",
+            minutes=settings.sync_interval_minutes,
+            id="gdelt_sync",
+            max_instances=1,
+            replace_existing=True,
+            kwargs={"bq_client": bq_client},
+        )
+        logger.info(
+            "sync_job_registered",
+            interval_minutes=settings.sync_interval_minutes,
+        )
+    else:
+        logger.info("sync_job_skipped", reason="disabled_by_config")
 
     # Ingestion job - hourly incremental
     scheduler.add_job(
