@@ -117,7 +117,14 @@ async def test_run_bootstrap_awaits_async_bigquery_client(db_session):
         ]
     )
 
-    with patch.object(ingestion_service, "get_settings") as mock_settings:
+    with (
+        patch.object(ingestion_service, "get_settings") as mock_settings,
+        patch.object(
+            ingestion_service,
+            "_iter_bootstrap_windows",
+            return_value=[(20260301000000, 20260302000000, 20260301, 20260301)],
+        ),
+    ):
         mock_settings.return_value.retention_days = 30
         mock_settings.return_value.ingestion_batch_size = 10000
 
@@ -188,6 +195,64 @@ async def test_run_incremental_limits_query_to_recent_sqldate_range(mock_bq_clie
         build_query.call_args.kwargs["date_from_sqldate"]
         <= build_query.call_args.kwargs["date_to_sqldate"]
     )
+
+
+def test_iter_bootstrap_windows_covers_retention_period_without_overlap():
+    """Bootstrap windows should cover the retention period with no overlap."""
+    from datetime import datetime, timezone
+
+    from app.services.ingestion_service import _iter_bootstrap_windows
+
+    start = datetime(2026, 2, 6, 0, 0, tzinfo=timezone.utc)
+    end = datetime(2026, 2, 8, 6, 30, tzinfo=timezone.utc)
+
+    windows = list(_iter_bootstrap_windows(start, end))
+
+    assert len(windows) == 3
+    assert windows[0] == (20260206000000, 20260207000000, 20260206, 20260206)
+    assert windows[1] == (20260207000000, 20260208000000, 20260207, 20260207)
+    assert windows[2] == (20260208000000, 20260208063000, 20260208, 20260208)
+
+
+@pytest.mark.asyncio
+async def test_run_bootstrap_uses_window_bounds_not_open_ended_watermark_paging(
+    mock_bq_client,
+    db_session,
+):
+    """Bootstrap should advance through bounded windows instead of open-ended scans."""
+    from datetime import datetime, timezone
+
+    from app.services import ingestion_service
+
+    with (
+        patch.object(ingestion_service, "get_settings") as mock_settings,
+        patch.object(
+            ingestion_service,
+            "_iter_bootstrap_windows",
+            return_value=[
+                (20260206000000, 20260207000000, 20260206, 20260206),
+                (20260207000000, 20260208000000, 20260207, 20260207),
+            ],
+        ),
+        patch.object(
+            ingestion_service,
+            "build_ingestion_bootstrap_query",
+            return_value=("SELECT 1", []),
+        ) as build_query,
+        patch.object(ingestion_service, "datetime") as mock_datetime,
+    ):
+        mock_settings.return_value.retention_days = 30
+        mock_settings.return_value.ingestion_batch_size = 10000
+        mock_datetime.now.return_value = datetime(2026, 2, 8, 6, 30, tzinfo=timezone.utc)
+        mock_datetime.strptime = datetime.strptime
+
+        await ingestion_service.run_bootstrap(mock_bq_client, db_session)
+
+    assert build_query.call_count == 2
+    first_call = build_query.call_args_list[0].kwargs
+    second_call = build_query.call_args_list[1].kwargs
+    assert first_call["since_dateadded"] == 20260206000000
+    assert second_call["since_dateadded"] == 20260207000000
 
 
 @pytest.mark.asyncio

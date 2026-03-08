@@ -26,6 +26,29 @@ def _dateadded_to_sqldate(dateadded: int) -> int:
     return int(str(dateadded)[:8])
 
 
+def _iter_bootstrap_windows(
+    start: datetime,
+    end: datetime,
+) -> list[tuple[int, int, int, int]]:
+    """Split bootstrap ingestion into non-overlapping daily windows."""
+    windows: list[tuple[int, int, int, int]] = []
+    cursor = start.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    while cursor < end:
+        next_cursor = min(cursor + timedelta(days=1), end)
+        windows.append(
+            (
+                int(cursor.strftime("%Y%m%d%H%M%S")),
+                int(next_cursor.strftime("%Y%m%d%H%M%S")),
+                int(cursor.strftime("%Y%m%d")),
+                int(cursor.strftime("%Y%m%d")),
+            )
+        )
+        cursor = next_cursor
+
+    return windows
+
+
 async def run_bootstrap(
     bq_client: BigQueryClientWrapper,
     session: AsyncSession,
@@ -44,21 +67,21 @@ async def run_bootstrap(
     )
     await session.commit()
 
-    # Calculate start date (30 days ago)
-    start_date = datetime.now(timezone.utc) - timedelta(days=settings.retention_days)
-    # DATEADDED format: YYYYMMDDHHMMSS - start with midnight
-    start_dateadded = int(start_date.strftime("%Y%m%d000000"))
-    date_to_sqldate = int(datetime.now(timezone.utc).strftime("%Y%m%d"))
+    now = datetime.now(timezone.utc)
+    start_date = now - timedelta(days=settings.retention_days)
 
     total_ingested = 0
-    last_watermark = start_dateadded
+    last_watermark = int(now.strftime("%Y%m%d%H%M%S"))
     batch_size = settings.ingestion_batch_size
 
     try:
-        while True:
+        for window_start, window_end, date_from_sqldate, date_to_sqldate in _iter_bootstrap_windows(
+            start_date,
+            now,
+        ):
             query, params = build_ingestion_bootstrap_query(
-                since_dateadded=last_watermark,
-                date_from_sqldate=_dateadded_to_sqldate(last_watermark),
+                since_dateadded=window_start,
+                date_from_sqldate=date_from_sqldate,
                 date_to_sqldate=date_to_sqldate,
                 limit=batch_size,
             )
@@ -66,7 +89,8 @@ async def run_bootstrap(
             rows: list[dict[str, Any]] = await bq_client.run_query(query, params)
 
             if not rows:
-                break
+                last_watermark = window_end
+                continue
 
             # Transform rows to event dicts
             events = [_row_to_event_dict(row) for row in rows]
@@ -79,19 +103,15 @@ async def run_bootstrap(
             await session.commit()
 
             total_ingested += inserted
-            last_watermark = events[-1]["date_added"]
+            last_watermark = window_end
 
             logger.info(
                 "bootstrap_batch_ingested",
                 batch_size=len(events),
                 inserted=inserted,
                 total=total_ingested,
-                watermark=last_watermark,
+                watermark=window_end,
             )
-
-            # If we got fewer than batch_size, we're done
-            if len(rows) < batch_size:
-                break
 
         # Mark as completed
         await ingestion_repository.update_ingestion_run(

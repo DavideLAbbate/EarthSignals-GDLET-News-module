@@ -9,6 +9,8 @@ Enforces MAX_BQ_SCAN_DAYS to prevent runaway table scans.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
 from google.cloud import bigquery
 
 from app.core.config import get_settings
@@ -246,14 +248,17 @@ SELECT
     ActionGeo_FullName, ActionGeo_CountryCode,
     SOURCEURL
     FROM {GDELT_TABLE}
-WHERE DATEADDED >= @since_dateadded
+WHERE DATEADDED >= @window_start_dateadded
+  AND DATEADDED < @window_end_dateadded
   AND SQLDATE >= @date_from_sqldate
   AND SQLDATE <= @date_to_sqldate
-ORDER BY DATEADDED ASC
+ORDER BY DATEADDED ASC, GLOBALEVENTID ASC
 LIMIT @limit
 """
+    window_end_dateadded = _next_dateadded_window_boundary(since_dateadded)
     params = [
-        bigquery.ScalarQueryParameter("since_dateadded", "INT64", since_dateadded),
+        bigquery.ScalarQueryParameter("window_start_dateadded", "INT64", since_dateadded),
+        bigquery.ScalarQueryParameter("window_end_dateadded", "INT64", window_end_dateadded),
         bigquery.ScalarQueryParameter("date_from_sqldate", "INT64", date_from_sqldate),
         bigquery.ScalarQueryParameter("date_to_sqldate", "INT64", date_to_sqldate),
         bigquery.ScalarQueryParameter("limit", "INT64", limit),
@@ -297,3 +302,11 @@ def _validate_date_range(date_from: int, date_to: int, max_bq_scan_days: int) ->
             f"{max_bq_scan_days} days. Narrow your date range to reduce BigQuery costs.",
             detail=f"date_from={date_from}, date_to={date_to}, max_days={max_bq_scan_days}",
         )
+
+
+def _next_dateadded_window_boundary(dateadded: int) -> int:
+    """Return the next daily DATEADDED boundary for a window start."""
+    dateadded_str = str(dateadded)
+    date_part = datetime.strptime(dateadded_str[:8], "%Y%m%d")
+    next_day = date_part + timedelta(days=1)
+    return int(next_day.strftime("%Y%m%d000000"))

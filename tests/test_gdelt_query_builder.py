@@ -179,7 +179,8 @@ def test_build_ingestion_bootstrap_query_uses_valid_table_identifier():
     assert "FROM `gdelt-bq.gdeltv2.events`" in sql
     assert "FROM ``gdelt-bq.gdeltv2.events``" not in sql
     assert [param.name for param in params] == [
-        "since_dateadded",
+        "window_start_dateadded",
+        "window_end_dateadded",
         "date_from_sqldate",
         "date_to_sqldate",
         "limit",
@@ -196,9 +197,11 @@ def test_build_ingestion_bootstrap_query_includes_sqldate_bounds():
 
     assert "SQLDATE >= @date_from_sqldate" in sql
     assert "SQLDATE <= @date_to_sqldate" in sql
-    assert "DATEADDED >= @since_dateadded" in sql
+    assert "DATEADDED >= @window_start_dateadded" in sql
+    assert "DATEADDED < @window_end_dateadded" in sql
     assert [param.name for param in params] == [
-        "since_dateadded",
+        "window_start_dateadded",
+        "window_end_dateadded",
         "date_from_sqldate",
         "date_to_sqldate",
         "limit",
@@ -215,9 +218,33 @@ def test_build_ingestion_incremental_query_includes_sqldate_bounds():
 
     assert "SQLDATE >= @date_from_sqldate" in sql
     assert "SQLDATE <= @date_to_sqldate" in sql
-    assert "DATEADDED >= @since_dateadded" in sql
+    assert "DATEADDED >= @window_start_dateadded" in sql
+    assert "DATEADDED < @window_end_dateadded" in sql
     assert [param.name for param in params] == [
-        "since_dateadded",
+        "window_start_dateadded",
+        "window_end_dateadded",
+        "date_from_sqldate",
+        "date_to_sqldate",
+        "limit",
+    ]
+
+
+def test_build_ingestion_bootstrap_query_uses_bounded_dateadded_window():
+    """Bootstrap ingestion should query a bounded DATEADDED window."""
+    sql, params = build_ingestion_bootstrap_query(
+        since_dateadded=20260301000000,
+        date_from_sqldate=20260301,
+        date_to_sqldate=20260301,
+        limit=10000,
+    )
+
+    assert "DATEADDED >= @since_dateadded" not in sql
+    assert "DATEADDED >= @window_start_dateadded" in sql
+    assert "DATEADDED < @window_end_dateadded" in sql
+    assert "ORDER BY DATEADDED ASC, GLOBALEVENTID ASC" in sql
+    assert [param.name for param in params] == [
+        "window_start_dateadded",
+        "window_end_dateadded",
         "date_from_sqldate",
         "date_to_sqldate",
         "limit",
