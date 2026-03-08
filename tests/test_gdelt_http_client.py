@@ -183,12 +183,12 @@ class TestFetchLatestExportUrl:
         from app.integrations.gdelt_http_client import GdeltHttpClient
 
         lastupdate_text = (
-            "1194680 http://data.gdeltproject.org/gdeltv2/20260308120000.export.CSV.zip "
-            "abc123def456abc123def456abc123de\n"
-            "1194680 http://data.gdeltproject.org/gdeltv2/20260308120000.mentions.CSV.zip "
-            "abc123def456abc123def456abc123df\n"
-            "1194680 http://data.gdeltproject.org/gdeltv2/20260308120000.gkg.csv.zip "
-            "abc123def456abc123def456abc123d0\n"
+            "1194680 abc123def456abc123def456abc123de "
+            "http://data.gdeltproject.org/gdeltv2/20260308120000.export.CSV.zip\n"
+            "1194680 abc123def456abc123def456abc123df "
+            "http://data.gdeltproject.org/gdeltv2/20260308120000.mentions.CSV.zip\n"
+            "1194680 abc123def456abc123def456abc123d0 "
+            "http://data.gdeltproject.org/gdeltv2/20260308120000.gkg.csv.zip\n"
         )
 
         mock_response = MagicMock()
@@ -212,13 +212,13 @@ class TestFetchLatestExportUrl:
 
 class TestFetchMasterExportUrls:
     _MASTER_TEXT = (
-        "1000 http://data.gdeltproject.org/gdeltv2/20260301000000.export.CSV.zip hash1\n"
-        "1000 http://data.gdeltproject.org/gdeltv2/20260301000000.mentions.CSV.zip hash2\n"
-        "1000 http://data.gdeltproject.org/gdeltv2/20260301001500.export.CSV.zip hash3\n"
-        "1000 http://data.gdeltproject.org/gdeltv2/20260305000000.export.CSV.zip hash4\n"
-        "1000 http://data.gdeltproject.org/gdeltv2/20260305000000.gkg.csv.zip hash5\n"
-        "1000 http://data.gdeltproject.org/gdeltv2/20260308000000.export.CSV.zip hash6\n"
-        "1000 http://data.gdeltproject.org/gdeltv2/20260309000000.export.CSV.zip hash7\n"
+        "1000 hash1 http://data.gdeltproject.org/gdeltv2/20260301000000.export.CSV.zip\n"
+        "1000 hash2 http://data.gdeltproject.org/gdeltv2/20260301000000.mentions.CSV.zip\n"
+        "1000 hash3 http://data.gdeltproject.org/gdeltv2/20260301001500.export.CSV.zip\n"
+        "1000 hash4 http://data.gdeltproject.org/gdeltv2/20260305000000.export.CSV.zip\n"
+        "1000 hash5 http://data.gdeltproject.org/gdeltv2/20260305000000.gkg.csv.zip\n"
+        "1000 hash6 http://data.gdeltproject.org/gdeltv2/20260308000000.export.CSV.zip\n"
+        "1000 hash7 http://data.gdeltproject.org/gdeltv2/20260309000000.export.CSV.zip\n"
     )
 
     def _make_client(self) -> object:

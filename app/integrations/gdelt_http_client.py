@@ -111,16 +111,16 @@ def _parse_export_lines(text: str) -> list[tuple[str, int]]:
     """
     Parse lines from lastupdate.txt or masterfilelist.txt.
 
-    Each line has the format: <size> <url> <md5>
+    Each line has the format: <size> <md5> <url>
     Returns a list of (url, timestamp_int) tuples for export files only,
     preserving the original line order.
     """
     results: list[tuple[str, int]] = []
     for line in text.splitlines():
         parts = line.split()
-        if len(parts) < 2:
+        if len(parts) < 3:
             continue
-        url = parts[1]
+        url = parts[2]
         match = _EXPORT_URL_TS_RE.search(url)
         if not match:
             continue
