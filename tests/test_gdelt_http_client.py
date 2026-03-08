@@ -201,7 +201,7 @@ class TestFetchLatestExportUrl:
         client = GdeltHttpClient(http_client=mock_http)
         url, ts = await client.fetch_latest_export_url()
 
-        assert "export" in url
+        assert ".export." in url
         assert ts == 20260308120000
 
 

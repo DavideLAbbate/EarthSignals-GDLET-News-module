@@ -276,34 +276,32 @@ def _parse_zip_content(content: bytes, source_url: str) -> list[dict[str, Any]]:
     Raises:
         IngestionError: If the bytes cannot be opened as a ZIP.
     """
+    rows: list[dict[str, Any]] = []
     try:
         buf = io.BytesIO(content)
-        zf = zipfile.ZipFile(buf)
+        with zipfile.ZipFile(buf) as zf:
+            for name in zf.namelist():
+                csv_bytes = zf.read(name)
+                csv_text = csv_bytes.decode("utf-8", errors="replace")
+                for line in csv_text.splitlines():
+                    if not line.strip():
+                        continue
+                    cols = line.split("\t")
+                    if len(cols) < _GDELT_COLUMN_COUNT:
+                        logger.warning(
+                            "gdelt_short_row_skipped",
+                            column_count=len(cols),
+                            source_url=source_url,
+                        )
+                        continue
+                    try:
+                        rows.append(parse_gdelt_csv_row(cols))
+                    except (ValueError, IndexError) as exc:
+                        logger.warning(
+                            "gdelt_malformed_row_skipped",
+                            error=str(exc),
+                            source_url=source_url,
+                        )
     except zipfile.BadZipFile as exc:
         raise IngestionError(f"Downloaded file is not a valid ZIP: {source_url}") from exc
-
-    rows: list[dict[str, Any]] = []
-    with zf:
-        for name in zf.namelist():
-            csv_bytes = zf.read(name)
-            csv_text = csv_bytes.decode("utf-8", errors="replace")
-            for line in csv_text.splitlines():
-                if not line.strip():
-                    continue
-                cols = line.split("\t")
-                if len(cols) < _GDELT_COLUMN_COUNT:
-                    logger.warning(
-                        "gdelt_short_row_skipped",
-                        column_count=len(cols),
-                        source_url=source_url,
-                    )
-                    continue
-                try:
-                    rows.append(parse_gdelt_csv_row(cols))
-                except (ValueError, IndexError) as exc:
-                    logger.warning(
-                        "gdelt_malformed_row_skipped",
-                        error=str(exc),
-                        source_url=source_url,
-                    )
     return rows
