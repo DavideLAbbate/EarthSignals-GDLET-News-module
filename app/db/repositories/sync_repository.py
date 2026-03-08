@@ -11,11 +11,11 @@ import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import desc, select, text
+from sqlalchemy import desc, func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import FilterMappingCache, SyncState
+from app.db.models import FilterMappingCache, GdeltEvent, SyncState
 
 
 # ── SyncState operations ──────────────────────────────────────────────────
@@ -67,6 +67,62 @@ async def db_ping(session: AsyncSession) -> bool:
         return True
     except Exception:
         return False
+
+
+async def get_latest_event_timestamps(session: AsyncSession) -> tuple[int | None, int | None]:
+    """Return latest SQLDATE and DATEADDED available in local event storage."""
+    stmt = select(func.max(GdeltEvent.sql_date), func.max(GdeltEvent.date_added))
+    result = await session.execute(stmt)
+    latest_sqldate, latest_dateadded = result.one()
+    return latest_sqldate, latest_dateadded
+
+
+async def get_top_countries_since(
+    session: AsyncSession,
+    since_sqldate: int,
+    limit: int = 20,
+) -> list[dict[str, int | str]]:
+    """Return top countries from local event storage since the given SQLDATE."""
+    stmt = (
+        select(
+            GdeltEvent.action_geo_country_code.label("fips_code"),
+            func.count().label("event_count"),
+        )
+        .where(
+            GdeltEvent.sql_date >= since_sqldate,
+            GdeltEvent.action_geo_country_code.is_not(None),
+            GdeltEvent.action_geo_country_code != "",
+        )
+        .group_by(GdeltEvent.action_geo_country_code)
+        .order_by(func.count().desc())
+        .limit(limit)
+    )
+    result = await session.execute(stmt)
+    return [dict(row._mapping) for row in result]
+
+
+async def get_top_event_root_codes_since(
+    session: AsyncSession,
+    since_sqldate: int,
+    limit: int = 20,
+) -> list[dict[str, int | str]]:
+    """Return top event root codes from local event storage since the given SQLDATE."""
+    stmt = (
+        select(
+            GdeltEvent.event_root_code.label("root_code"),
+            func.count().label("event_count"),
+        )
+        .where(
+            GdeltEvent.sql_date >= since_sqldate,
+            GdeltEvent.event_root_code.is_not(None),
+            GdeltEvent.event_root_code != "",
+        )
+        .group_by(GdeltEvent.event_root_code)
+        .order_by(func.count().desc())
+        .limit(limit)
+    )
+    result = await session.execute(stmt)
+    return [dict(row._mapping) for row in result]
 
 
 # ── FilterMappingCache operations ─────────────────────────────────────────
