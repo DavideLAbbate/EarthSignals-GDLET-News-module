@@ -55,7 +55,7 @@ async def run_bootstrap(
                 limit=batch_size,
             )
 
-            rows = await bq_client.run_query(query, params)
+            rows: list[dict[str, Any]] = await bq_client.run_query(query, params)
 
             if not rows:
                 break
@@ -168,7 +168,7 @@ async def run_incremental(
                 limit=batch_size,
             )
 
-            rows = await bq_client.run_query(query, params)
+            rows: list[dict[str, Any]] = await bq_client.run_query(query, params)
 
             if not rows:
                 break

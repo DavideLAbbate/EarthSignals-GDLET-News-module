@@ -13,8 +13,7 @@ from app.db.repositories import ingestion_repository
 def mock_bq_client():
     """Create a mock BigQuery client."""
     client = MagicMock()
-    # run_query is called via asyncio.to_thread, so it should return a regular value
-    client.run_query = MagicMock(return_value=[])
+    client.run_query = AsyncMock(return_value=[])
     return client
 
 

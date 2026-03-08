@@ -243,7 +243,7 @@ SELECT
     NumMentions, NumSources, NumArticles,
     ActionGeo_FullName, ActionGeo_CountryCode,
     SOURCEURL
-FROM `{GDELT_TABLE}`
+    FROM {GDELT_TABLE}
 WHERE DATEADDED >= @since_dateadded
 ORDER BY DATEADDED ASC
 LIMIT @limit

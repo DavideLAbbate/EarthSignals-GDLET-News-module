@@ -18,7 +18,7 @@ os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///./test.db")
 os.environ.setdefault("API_KEY", "test-api-key")
 
 from app.core.exceptions import QueryValidationError
-from app.integrations.gdelt_query_builder import build_events_query
+from app.integrations.gdelt_query_builder import build_events_query, build_ingestion_bootstrap_query
 
 
 def test_build_events_query_basic():
@@ -162,3 +162,12 @@ def test_build_events_query_never_select_star():
     )
     assert "SELECT *" not in sql
     assert "SELECT\n    GLOBALEVENTID" in sql or "SELECT\n" in sql
+
+
+def test_build_ingestion_bootstrap_query_uses_valid_table_identifier():
+    """Bootstrap ingestion should reference the GDELT table with one pair of backticks."""
+    sql, params = build_ingestion_bootstrap_query(since_dateadded=20260301000000)
+
+    assert "FROM `gdelt-bq.gdeltv2.events`" in sql
+    assert "FROM ``gdelt-bq.gdeltv2.events``" not in sql
+    assert [param.name for param in params] == ["since_dateadded", "limit"]
