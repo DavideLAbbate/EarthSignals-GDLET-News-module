@@ -31,6 +31,10 @@ class Settings(BaseSettings):
         ...,
         description="GCP project ID for billing attribution",
     )
+    gcp_service_account_json: str | None = Field(
+        default=None,
+        description="Optional inline GCP service account JSON for hosted deployments",
+    )
     bq_max_results: int = Field(default=500, ge=1, le=10_000)
     max_bq_scan_days: int = Field(default=3650, ge=1, le=36500)
     bq_executor_max_workers: int = Field(default=4, ge=1, le=32)

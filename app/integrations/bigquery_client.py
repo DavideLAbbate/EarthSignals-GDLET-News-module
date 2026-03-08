@@ -12,10 +12,12 @@ once at startup and shut down cleanly on application shutdown.
 from __future__ import annotations
 
 import asyncio
+import json
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from google.cloud import bigquery
+from google.oauth2 import service_account
 
 from app.core.config import get_settings
 from app.core.exceptions import BigQueryError
@@ -105,11 +107,13 @@ def create_bigquery_client() -> BigQueryClientWrapper:
     settings = get_settings()
 
     try:
-        client = bigquery.Client(project=settings.gcp_project_id)
+        credentials = _load_bigquery_credentials(settings.gcp_service_account_json)
+        client = bigquery.Client(project=settings.gcp_project_id, credentials=credentials)
     except Exception as exc:
         raise BigQueryError(
             f"Failed to create BigQuery client: {exc}. "
-            "Ensure GOOGLE_APPLICATION_CREDENTIALS points to a valid service account key.",
+            "Ensure GOOGLE_APPLICATION_CREDENTIALS points to a valid service account key, "
+            "or set GCP_SERVICE_ACCOUNT_JSON to a valid service account JSON payload.",
             detail=str(exc),
         ) from exc
 
@@ -123,3 +127,25 @@ def create_bigquery_client() -> BigQueryClientWrapper:
         executor_workers=settings.bq_executor_max_workers,
     )
     return BigQueryClientWrapper(client, executor)
+
+
+def _load_bigquery_credentials(service_account_json: str | None):
+    """Load credentials from inline service account JSON when available."""
+    if not service_account_json:
+        return None
+
+    try:
+        service_account_info = json.loads(service_account_json)
+    except json.JSONDecodeError as exc:
+        raise BigQueryError(
+            "Invalid GCP service account JSON provided in GCP_SERVICE_ACCOUNT_JSON.",
+            detail=str(exc),
+        ) from exc
+
+    try:
+        return service_account.Credentials.from_service_account_info(service_account_info)
+    except Exception as exc:
+        raise BigQueryError(
+            "Failed to load credentials from GCP service account JSON.",
+            detail=str(exc),
+        ) from exc
