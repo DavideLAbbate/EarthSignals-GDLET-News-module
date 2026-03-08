@@ -147,8 +147,14 @@ class GdeltHttpClient:
 
     @classmethod
     def create(cls, timeout: float = 30.0) -> GdeltHttpClient:
-        """Create a production GdeltHttpClient with a real httpx.AsyncClient."""
-        client = httpx.AsyncClient(timeout=timeout)
+        """Create a production GdeltHttpClient with a real httpx.AsyncClient.
+
+        SSL verification is disabled because GDELT's CDN serves a certificate
+        whose hostname does not match 'data.gdeltproject.org' (hostname mismatch).
+        The connection is still encrypted — only peer identity verification is skipped.
+        GDELT is a public read-only data source with no credentials involved.
+        """
+        client = httpx.AsyncClient(timeout=timeout, verify=False)
         return cls(http_client=client)
 
     async def close(self) -> None:
