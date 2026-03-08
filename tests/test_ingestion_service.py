@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -203,7 +204,7 @@ async def test_run_incremental_with_existing_bootstrap_watermark(mock_gdelt_clie
 
     # Latest file is newer than the bootstrap watermark
     mock_gdelt_client.fetch_latest_export_url = AsyncMock(
-        return_value=("https://fake/20260308120000.export.CSV.zip", 20260308120000)
+        return_value=("https://fake/20990308120000.export.CSV.zip", 20990308120000)
     )
     mock_gdelt_client.download_events = AsyncMock(return_value=[_make_gdelt_row()])
 
@@ -218,6 +219,51 @@ async def test_run_incremental_with_existing_bootstrap_watermark(mock_gdelt_clie
 
     assert result["status"] == "completed"
     mock_gdelt_client.download_events.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_run_incremental_rolls_back_before_marking_failed(mock_gdelt_client):
+    """Incremental rolls back the session before recording a failed run."""
+    from app.services import ingestion_service
+
+    session = AsyncMock()
+    session.commit = AsyncMock()
+    session.rollback = AsyncMock()
+
+    mock_gdelt_client.fetch_latest_export_url = AsyncMock(
+        return_value=("https://fake/20990308120000.export.CSV.zip", 20990308120000)
+    )
+    mock_gdelt_client.download_events = AsyncMock(return_value=[_make_gdelt_row()])
+
+    with (
+        patch.object(ingestion_service, "_get_gdelt_client", return_value=mock_gdelt_client),
+        patch.object(
+            ingestion_service.ingestion_repository,
+            "get_latest_successful_ingestion",
+            AsyncMock(side_effect=[None, None]),
+        ),
+        patch.object(
+            ingestion_service.ingestion_repository,
+            "create_ingestion_run",
+            AsyncMock(return_value=SimpleNamespace(id=123)),
+        ),
+        patch.object(
+            ingestion_service.event_repository,
+            "bulk_insert_events",
+            AsyncMock(side_effect=RuntimeError("insert failed")),
+        ),
+        patch.object(
+            ingestion_service.ingestion_repository,
+            "update_ingestion_run",
+            AsyncMock(),
+        ) as mock_update_run,
+    ):
+        with pytest.raises(RuntimeError, match="insert failed"):
+            await ingestion_service.run_incremental(session)
+
+    session.rollback.assert_awaited_once()
+    mock_update_run.assert_awaited_once()
+    mock_gdelt_client.close.assert_awaited_once()
 
 
 @pytest.mark.asyncio

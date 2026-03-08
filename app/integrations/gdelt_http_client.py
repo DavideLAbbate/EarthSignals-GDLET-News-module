@@ -67,6 +67,14 @@ def _float_or_none(value: str) -> float | None:
     return float(stripped)
 
 
+def _code_or_none(value: str, max_length: int) -> str | None:
+    """Return an uppercase code if present and within the expected max length."""
+    stripped = value.strip().upper()
+    if not stripped or len(stripped) > max_length:
+        return None
+    return stripped
+
+
 def parse_gdelt_csv_row(row: list[str]) -> dict[str, Any]:
     """
     Extract the 17 relevant fields from a 61-column GDELT v2 export row.
@@ -84,8 +92,8 @@ def parse_gdelt_csv_row(row: list[str]) -> dict[str, Any]:
     return {
         "GLOBALEVENTID": int(row[0]),
         "SQLDATE": int(row[1]),
-        "Actor1CountryCode": _str_or_none(row[5]),
-        "Actor2CountryCode": _str_or_none(row[15]),
+        "Actor1CountryCode": _code_or_none(row[7], 3),
+        "Actor2CountryCode": _code_or_none(row[17], 3),
         "EventCode": _str_or_none(row[26]),
         "EventBaseCode": _str_or_none(row[27]),
         "EventRootCode": _str_or_none(row[28]),
@@ -95,9 +103,9 @@ def parse_gdelt_csv_row(row: list[str]) -> dict[str, Any]:
         "NumSources": _int_or_none(row[32]),
         "NumArticles": _int_or_none(row[33]),
         "AvgTone": _float_or_none(row[34]),
-        "ActionGeo_FullName": _str_or_none(row[51]),
-        "ActionGeo_CountryCode": _str_or_none(row[53]),
-        "DATEADDED": int(row[57]),
+        "ActionGeo_FullName": _str_or_none(row[52]),
+        "ActionGeo_CountryCode": _code_or_none(row[53], 2),
+        "DATEADDED": int(row[59]),
         "SOURCEURL": _str_or_none(row[60]),
     }
 

@@ -97,6 +97,7 @@ async def run_bootstrap(session: AsyncSession) -> dict[str, Any]:
 
     except Exception as e:
         logger.error("bootstrap_failed", error=str(e))
+        await session.rollback()
         await ingestion_repository.update_ingestion_run(
             session,
             run.id,
@@ -182,6 +183,7 @@ async def run_incremental(session: AsyncSession) -> dict[str, Any]:
 
     except Exception as e:
         logger.error("incremental_failed", error=str(e))
+        await session.rollback()
         await ingestion_repository.update_ingestion_run(
             session,
             run.id,

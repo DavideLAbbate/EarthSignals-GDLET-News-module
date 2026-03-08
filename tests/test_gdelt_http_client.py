@@ -24,8 +24,8 @@ def _make_row(overrides: dict[int, str] | None = None) -> list[str]:
     row = [""] * 61
     row[0] = "123456789"  # GLOBALEVENTID
     row[1] = "20260308"  # SQLDATE
-    row[5] = "US"  # Actor1CountryCode
-    row[15] = "RU"  # Actor2CountryCode
+    row[7] = "US"  # Actor1CountryCode
+    row[17] = "RU"  # Actor2CountryCode
     row[26] = "0411"  # EventCode
     row[27] = "04"  # EventBaseCode
     row[28] = "04"  # EventRootCode
@@ -35,9 +35,9 @@ def _make_row(overrides: dict[int, str] | None = None) -> list[str]:
     row[32] = "2"  # NumSources
     row[33] = "3"  # NumArticles
     row[34] = "1.75"  # AvgTone
-    row[51] = "Washington, DC"  # ActionGeo_FullName
+    row[52] = "Washington, DC"  # ActionGeo_FullName
     row[53] = "US"  # ActionGeo_CountryCode
-    row[57] = "20260308120000"  # DATEADDED
+    row[59] = "20260308120000"  # DATEADDED
     row[60] = "https://example.com/article"  # SOURCEURL
     if overrides:
         for idx, val in overrides.items():
@@ -88,11 +88,53 @@ class TestParseGdeltCsvRow:
         assert result["DATEADDED"] == 20260308120000
         assert result["SOURCEURL"] == "https://example.com/article"
 
+    def test_parse_gdelt_csv_row_maps_real_gdelt_sample_row(self):
+        """A real GDELT export row maps action geo and DATEADDED correctly."""
+        from app.integrations.gdelt_http_client import parse_gdelt_csv_row
+
+        row = [""] * 61
+        row[0] = "1293127183"
+        row[1] = "20250308"
+        row[15] = "AGR"
+        row[16] = "FARMER"
+        row[22] = "AGR"
+        row[25] = "1"
+        row[26] = "100"
+        row[27] = "100"
+        row[28] = "10"
+        row[29] = "3"
+        row[30] = "-5.0"
+        row[31] = "5"
+        row[32] = "1"
+        row[33] = "5"
+        row[34] = "-2.11480362537765"
+        row[51] = "1"
+        row[52] = "Canada"
+        row[53] = "CA"
+        row[54] = "CA"
+        row[56] = "60"
+        row[57] = "-96"
+        row[58] = "CA"
+        row[59] = "20260308181500"
+        row[60] = (
+            "https://www.cbc.ca/news/canada/nova-scotia/n-s-diesel-price-increases-pressure-farming-trucking-sectors-9.7119581"
+        )
+
+        result = parse_gdelt_csv_row(row)
+
+        assert result["GLOBALEVENTID"] == 1293127183
+        assert result["SQLDATE"] == 20250308
+        assert result["EventCode"] == "100"
+        assert result["ActionGeo_FullName"] == "Canada"
+        assert result["ActionGeo_CountryCode"] == "CA"
+        assert result["DATEADDED"] == 20260308181500
+        assert result["SOURCEURL"].startswith("https://www.cbc.ca/")
+
     def test_parse_gdelt_csv_row_handles_empty_optional_string_fields(self):
         """Empty strings for optional string columns become None."""
         from app.integrations.gdelt_http_client import parse_gdelt_csv_row
 
-        row = _make_row({5: "", 15: "", 51: "", 53: "", 60: ""})
+        row = _make_row({7: "", 17: "", 52: "", 53: "", 60: ""})
         result = parse_gdelt_csv_row(row)
 
         assert result["Actor1CountryCode"] is None
