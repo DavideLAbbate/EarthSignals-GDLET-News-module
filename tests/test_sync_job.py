@@ -6,10 +6,8 @@ Verifies that sync writes correct SyncState to DB and is idempotent.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
 
 from app.db.repositories.sync_repository import get_latest_sync_state
 from app.scheduler.sync_job import run_gdelt_sync
@@ -51,14 +49,13 @@ async def test_sync_job_writes_sync_state(db_session):
     bq_client = _make_bq_client()
 
     # Patch session factory to use our test session
-    import app.scheduler.sync_job as sync_module
-    from sqlalchemy.ext.asyncio import async_sessionmaker
 
     mock_factory_instance = MagicMock()
     mock_factory_instance.__aenter__ = AsyncMock(return_value=db_session)
     mock_factory_instance.__aexit__ = AsyncMock(return_value=False)
 
     import unittest.mock
+
     with unittest.mock.patch("app.scheduler.sync_job._get_session_factory") as mock_factory:
         mock_factory.return_value = lambda: mock_factory_instance
         await run_gdelt_sync(bq_client)
@@ -115,6 +112,7 @@ async def test_sync_job_idempotent(db_session):
 
     from sqlalchemy import select
     from app.db.models import SyncState
+
     result = await db_session.execute(select(SyncState))
     all_states = result.scalars().all()
     assert len(all_states) >= 1  # At least one sync

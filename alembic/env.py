@@ -8,7 +8,6 @@ DATABASE_URL environment variable via pydantic-settings.
 from __future__ import annotations
 
 import asyncio
-import os
 
 from alembic import context
 from sqlalchemy import pool

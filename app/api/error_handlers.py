@@ -17,10 +17,15 @@ from app.core.exceptions import (
     GDELTBackendError,
     QueryValidationError,
     SyncError,
+    IngestionError,
+    RetentionError,
+    LocalQueryError,
 )
 
 
-def _error_response(status_code: int, error_type: str, message: str, detail: str | None = None) -> JSONResponse:
+def _error_response(
+    status_code: int, error_type: str, message: str, detail: str | None = None
+) -> JSONResponse:
     body = {"error": error_type, "message": message}
     if detail:
         body["detail"] = detail
@@ -53,9 +58,7 @@ def register_error_handlers(app: FastAPI) -> None:
         )
 
     @app.exception_handler(BigQueryError)
-    async def handle_bigquery_error(
-        request: Request, exc: BigQueryError
-    ) -> JSONResponse:
+    async def handle_bigquery_error(request: Request, exc: BigQueryError) -> JSONResponse:
         return _error_response(
             502,
             "bigquery_error",
@@ -77,9 +80,7 @@ def register_error_handlers(app: FastAPI) -> None:
         return response
 
     @app.exception_handler(SyncError)
-    async def handle_sync_error(
-        request: Request, exc: SyncError
-    ) -> JSONResponse:
+    async def handle_sync_error(request: Request, exc: SyncError) -> JSONResponse:
         return _error_response(
             500,
             "sync_error",
@@ -87,10 +88,47 @@ def register_error_handlers(app: FastAPI) -> None:
             exc.detail,
         )
 
-    @app.exception_handler(GDELTBackendError)
-    async def handle_generic_gdelt_error(
-        request: Request, exc: GDELTBackendError
+    @app.exception_handler(IngestionError)
+    async def ingestion_error_handler(
+        request: Request,
+        exc: IngestionError,
     ) -> JSONResponse:
+        """Handle IngestionError - returns 500."""
+        return _error_response(
+            500,
+            "ingestion_error",
+            exc.message,
+            exc.detail,
+        )
+
+    @app.exception_handler(RetentionError)
+    async def retention_error_handler(
+        request: Request,
+        exc: RetentionError,
+    ) -> JSONResponse:
+        """Handle RetentionError - returns 500."""
+        return _error_response(
+            500,
+            "retention_error",
+            exc.message,
+            exc.detail,
+        )
+
+    @app.exception_handler(LocalQueryError)
+    async def local_query_error_handler(
+        request: Request,
+        exc: LocalQueryError,
+    ) -> JSONResponse:
+        """Handle LocalQueryError - returns 502 (similar to BigQueryError)."""
+        return _error_response(
+            502,
+            "local_query_error",
+            exc.message,
+            exc.detail,
+        )
+
+    @app.exception_handler(GDELTBackendError)
+    async def handle_generic_gdelt_error(request: Request, exc: GDELTBackendError) -> JSONResponse:
         return _error_response(
             500,
             "internal_error",
@@ -99,9 +137,7 @@ def register_error_handlers(app: FastAPI) -> None:
         )
 
     @app.exception_handler(Exception)
-    async def handle_unhandled_exception(
-        request: Request, exc: Exception
-    ) -> JSONResponse:
+    async def handle_unhandled_exception(request: Request, exc: Exception) -> JSONResponse:
         return _error_response(
             500,
             "unexpected_error",

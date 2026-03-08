@@ -21,10 +21,10 @@ class TopEventCode(BaseModel):
 class SyncStatusResponse(BaseModel):
     """Response schema for GET /sync/status."""
 
-    last_sync_at: str | None = None          # ISO 8601 UTC
-    latest_sqldate: int | None = None        # Most recent GDELT record date (YYYYMMDD)
-    mapping_version: str | None = None       # ISO 8601 UTC
-    sync_status: str = "unknown"             # "success" | "error" | "unknown"
+    last_sync_at: str | None = None  # ISO 8601 UTC
+    latest_sqldate: int | None = None  # Most recent GDELT record date (YYYYMMDD)
+    mapping_version: str | None = None  # ISO 8601 UTC
+    sync_status: str = "unknown"  # "success" | "error" | "unknown"
     error_message: str | None = None
     top_countries: list[TopCountry] = []
     top_event_root_codes: list[TopEventCode] = []

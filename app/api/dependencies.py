@@ -12,6 +12,7 @@ from __future__ import annotations
 import anthropic
 from fastapi import Depends, HTTPException, Request, Security, status
 from fastapi.security import APIKeyHeader
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.integrations.bigquery_client import BigQueryClientWrapper
@@ -67,7 +68,10 @@ async def get_anthropic_client(request: Request) -> anthropic.AsyncAnthropic:
     if client is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={"error": "anthropic_unavailable", "message": "Anthropic client not initialized"},
+            detail={
+                "error": "anthropic_unavailable",
+                "message": "Anthropic client not initialized",
+            },
         )
     return client
 
@@ -75,3 +79,10 @@ async def get_anthropic_client(request: Request) -> anthropic.AsyncAnthropic:
 async def get_scheduler(request: Request):
     """Return the APScheduler instance from app state."""
     return getattr(request.app.state, "scheduler", None)
+
+
+async def get_event_count(session: AsyncSession = Depends(get_async_session)) -> int:
+    """Get the count of events in the local store."""
+    from app.db.repositories import event_repository
+
+    return await event_repository.get_event_count(session)

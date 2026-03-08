@@ -57,3 +57,31 @@ class AnthropicUnavailableError(GDELTBackendError):
 
     Maps to HTTP 503 Service Unavailable with Retry-After header.
     """
+
+
+class IngestionError(GDELTBackendError):
+    """Raised when event ingestion from BigQuery fails."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
+class RetentionError(GDELTBackendError):
+    """Raised when retention cleanup fails."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
+class LocalQueryError(GDELTBackendError):
+    """Raised when local PostgreSQL query fails.
+
+    Replaces BigQueryError for runtime search operations.
+    BigQueryError is still used for ingestion-side queries.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message

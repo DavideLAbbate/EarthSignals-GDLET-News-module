@@ -23,9 +23,7 @@ from app.db.models import FilterMappingCache, SyncState
 
 async def get_latest_sync_state(session: AsyncSession) -> SyncState | None:
     """Return the most recent SyncState row, or None if no syncs have run."""
-    result = await session.execute(
-        select(SyncState).order_by(desc(SyncState.synced_at)).limit(1)
-    )
+    result = await session.execute(select(SyncState).order_by(desc(SyncState.synced_at)).limit(1))
     return result.scalar_one_or_none()
 
 
@@ -88,9 +86,7 @@ def compute_cache_key(raw_filter_input: dict) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
-async def get_cached_filter(
-    session: AsyncSession, cache_key: str
-) -> FilterMappingCache | None:
+async def get_cached_filter(session: AsyncSession, cache_key: str) -> FilterMappingCache | None:
     """
     Return a non-expired cache entry for the given key, or None.
     """

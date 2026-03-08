@@ -77,7 +77,9 @@ def build_events_query(
     params.append(bigquery.ScalarQueryParameter("date_to", "INT64", date_to_sqldate))
 
     # ── Optional: geographic filters (FIPS 2-letter) ──────────────────────
-    merged_geo_codes = sorted(set((geo_country_codes or []) + ([fips_country_code] if fips_country_code else [])))
+    merged_geo_codes = sorted(
+        set((geo_country_codes or []) + ([fips_country_code] if fips_country_code else []))
+    )
     if merged_geo_codes:
         where_clauses.append("ActionGeo_CountryCode IN UNNEST(@geo_country_codes)")
         params.append(bigquery.ArrayQueryParameter("geo_country_codes", "STRING", merged_geo_codes))
@@ -87,16 +89,22 @@ def build_events_query(
         where_clauses.append(
             "(Actor1CountryCode = @cameo_country_code OR Actor2CountryCode = @cameo_country_code)"
         )
-        params.append(bigquery.ScalarQueryParameter("cameo_country_code", "STRING", cameo_country_code))
+        params.append(
+            bigquery.ScalarQueryParameter("cameo_country_code", "STRING", cameo_country_code)
+        )
 
     # ── Optional: direct actor-country filters ─────────────────────────────
     if actor1_country_code:
         where_clauses.append("Actor1CountryCode = @actor1_country_code")
-        params.append(bigquery.ScalarQueryParameter("actor1_country_code", "STRING", actor1_country_code))
+        params.append(
+            bigquery.ScalarQueryParameter("actor1_country_code", "STRING", actor1_country_code)
+        )
 
     if actor2_country_code:
         where_clauses.append("Actor2CountryCode = @actor2_country_code")
-        params.append(bigquery.ScalarQueryParameter("actor2_country_code", "STRING", actor2_country_code))
+        params.append(
+            bigquery.ScalarQueryParameter("actor2_country_code", "STRING", actor2_country_code)
+        )
 
     # ── Optional: event code filters ───────────────────────────────────────
     if event_root_codes:
@@ -218,17 +226,53 @@ LIMIT 20
     return sql, params
 
 
+def build_ingestion_bootstrap_query(
+    since_dateadded: int,
+    limit: int = 10_000,
+) -> tuple[str, list[bigquery.ScalarQueryParameter]]:
+    """
+    Build query for bootstrap ingestion - fetch events since a DATEADDED timestamp.
+    Used for initial load of the rolling window.
+    """
+    query = f"""
+SELECT
+    GLOBALEVENTID, SQLDATE, DATEADDED,
+    Actor1CountryCode, Actor2CountryCode,
+    EventCode, EventBaseCode, EventRootCode,
+    QuadClass, GoldsteinScale, AvgTone,
+    NumMentions, NumSources, NumArticles,
+    ActionGeo_FullName, ActionGeo_CountryCode,
+    SOURCEURL
+FROM `{GDELT_TABLE}`
+WHERE DATEADDED >= @since_dateadded
+ORDER BY DATEADDED ASC
+LIMIT @limit
+"""
+    params = [
+        bigquery.ScalarQueryParameter("since_dateadded", "INT64", since_dateadded),
+        bigquery.ScalarQueryParameter("limit", "INT64", limit),
+    ]
+    return query, params
+
+
+def build_ingestion_incremental_query(
+    since_dateadded: int,
+    limit: int = 10_000,
+) -> tuple[str, list[bigquery.ScalarQueryParameter]]:
+    """
+    Build query for incremental ingestion - fetch events newer than watermark.
+    Identical to bootstrap but semantically different use case.
+    """
+    return build_ingestion_bootstrap_query(since_dateadded, limit)
+
+
 # ── Private helpers ───────────────────────────────────────────────────────
 
 
-def _validate_date_range(
-    date_from: int, date_to: int, max_bq_scan_days: int
-) -> None:
+def _validate_date_range(date_from: int, date_to: int, max_bq_scan_days: int) -> None:
     """Validate the date range against order and rough scan size."""
     if date_from > date_to:
-        raise QueryValidationError(
-            f"date_from ({date_from}) must be <= date_to ({date_to})"
-        )
+        raise QueryValidationError(f"date_from ({date_from}) must be <= date_to ({date_to})")
 
     from_year, from_day = divmod(date_from, 10000)
     to_year, to_day = divmod(date_to, 10000)

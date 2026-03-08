@@ -22,7 +22,6 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 
-import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -36,7 +35,12 @@ from app.core.logging import configure_logging, get_logger
 from app.db.session import dispose_engine
 from app.integrations.anthropic_client import create_anthropic_client
 from app.integrations.bigquery_client import create_bigquery_client
-from app.scheduler.scheduler import add_sync_job, create_scheduler, trigger_sync_now
+from app.scheduler.scheduler import (
+    add_sync_job,
+    create_scheduler,
+    trigger_startup_ingestion_if_needed,
+    trigger_sync_now,
+)
 
 logger = get_logger(__name__)
 
@@ -72,6 +76,7 @@ async def lifespan(app: FastAPI):
     # ── Initial sync on startup ────────────────────────────────────────────
     # Run async to not block startup — errors are handled inside sync_job
     asyncio.create_task(trigger_sync_now(bq_client))
+    asyncio.create_task(trigger_startup_ingestion_if_needed(bq_client))
 
     logger.info("application_ready")
     yield

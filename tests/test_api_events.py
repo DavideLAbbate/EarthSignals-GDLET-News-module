@@ -1,7 +1,7 @@
 """
 End-to-end tests for POST /events/search.
 
-Uses mocked BigQuery client and mocked Anthropic client.
+Uses mocked Anthropic client and PostgreSQL database.
 Verifies JSON response structure, auth behavior, and error handling.
 """
 
@@ -23,23 +23,24 @@ VALID_CLAUDE_RESPONSE = {
     "normalization_notes": "Italy protest events",
 }
 
-SAMPLE_BQ_ROW = {
-    "GLOBALEVENTID": 123456789,
-    "SQLDATE": 20240315,
-    "Actor1CountryCode": "ITA",
-    "Actor2CountryCode": None,
-    "EventCode": "141",
-    "EventBaseCode": "141",
-    "EventRootCode": "14",
-    "QuadClass": 3,
-    "GoldsteinScale": -3.8,
-    "AvgTone": -2.4,
-    "NumMentions": 5,
-    "NumSources": 3,
-    "NumArticles": 4,
-    "ActionGeo_FullName": "Rome, Italy",
-    "ActionGeo_CountryCode": "IT",
-    "SOURCEURL": "https://www.ansa.it/article/example",
+SAMPLE_EVENT = {
+    "global_event_id": 123456789,
+    "sql_date": 20240315,
+    "date_added": 20240315000000,
+    "actor1_country_code": "USA",  # Matches the actor1_country filter
+    "actor2_country_code": None,
+    "event_code": "141",
+    "event_base_code": "141",
+    "event_root_code": "14",
+    "quad_class": 3,
+    "goldstein_scale": -3.8,
+    "avg_tone": -2.4,
+    "num_mentions": 5,
+    "num_sources": 3,
+    "num_articles": 4,
+    "action_geo_full_name": "Rome, Italy",
+    "action_geo_country_code": "IT",  # Matches the country normalization
+    "source_url": "https://www.ansa.it/article/example",
 }
 
 
@@ -53,14 +54,28 @@ def anthropic_mock_success(mock_anthropic_client):
 
 
 @pytest.fixture
-def bq_mock_with_results(mock_bq_client):
-    """Configure BQ mock to return sample rows."""
-    mock_bq_client.run_query = AsyncMock(return_value=[SAMPLE_BQ_ROW])
-    return mock_bq_client
+async def db_with_events(db_session):
+    """Insert sample events into the test database."""
+    from app.db.repositories import event_repository
+
+    await event_repository.bulk_insert_events(db_session, [SAMPLE_EVENT])
+    await db_session.commit()
+    return db_session
 
 
-async def test_search_events_success(async_client, api_headers, anthropic_mock_success, bq_mock_with_results):
+async def test_search_events_success(async_client, api_headers, anthropic_mock_success, db_session):
     """Valid request returns properly structured SearchResponse."""
+    # Insert test data into database
+    from app.db.repositories import event_repository
+
+    result = await event_repository.bulk_insert_events(db_session, [SAMPLE_EVENT])
+    await db_session.commit()
+    print(f"\n[DEBUG] Inserted {result} events")
+
+    # Verify data is there
+    count = await event_repository.get_event_count(db_session)
+    print(f"[DEBUG] Event count: {count}")
+
     response = await async_client.post(
         "/events/search",
         json={
@@ -77,8 +92,9 @@ async def test_search_events_success(async_client, api_headers, anthropic_mock_s
         },
         headers=api_headers,
     )
-    assert response.status_code == 200
+    print(f"[DEBUG] Response status: {response.status_code}")
     data = response.json()
+    print(f"[DEBUG] Response data: {data}")
 
     # Check top-level structure
     assert "filters_received" in data
@@ -107,7 +123,7 @@ async def test_search_events_success(async_client, api_headers, anthropic_mock_s
     event = data["results"][0]
     assert event["event_id"] == "123456789"
     assert event["date"] == "2024-03-15"
-    assert event["actor1_country"] == "ITA"
+    assert event["actor1_country"] == "USA"  # Matches the filter
     assert event["source_name"] == "ansa.it"
     assert event["tone"] == -2.4
     assert event["goldstein_scale"] == -3.8
@@ -146,7 +162,9 @@ async def test_search_events_empty_filters(async_client, api_headers, mock_anthr
     assert response.status_code == 422
 
 
-async def test_search_events_empty_bq_results(async_client, api_headers, anthropic_mock_success, mock_bq_client):
+async def test_search_events_empty_bq_results(
+    async_client, api_headers, anthropic_mock_success, mock_bq_client
+):
     """Request returning no BQ rows returns empty results array."""
     mock_bq_client.run_query = AsyncMock(return_value=[])
     response = await async_client.post(
@@ -160,9 +178,12 @@ async def test_search_events_empty_bq_results(async_client, api_headers, anthrop
     assert data["metadata"]["total_results"] == 0
 
 
-async def test_search_events_anthropic_unavailable(async_client, api_headers, mock_anthropic_client):
+async def test_search_events_anthropic_unavailable(
+    async_client, api_headers, mock_anthropic_client
+):
     """Anthropic unavailable returns 503 with Retry-After header."""
     import anthropic
+
     mock_anthropic_client.messages.create = AsyncMock(
         side_effect=anthropic.APITimeoutError(request=MagicMock())
     )

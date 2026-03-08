@@ -10,10 +10,10 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import get_bq_client, get_scheduler, verify_api_key
+from app.api.dependencies import get_bq_client, verify_api_key
 from app.core.logging import get_logger
 from app.db.repositories.sync_repository import get_latest_sync_state
 from app.db.session import get_async_session
@@ -105,6 +105,7 @@ async def manual_sync_refresh(
 
     # Run sync in background (fire-and-forget via asyncio.create_task)
     import asyncio
+
     asyncio.create_task(trigger_sync_now(bq_client))
 
     return {

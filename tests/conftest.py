@@ -12,7 +12,6 @@ import os
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -20,9 +19,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 os.environ.setdefault("GOOGLE_APPLICATION_CREDENTIALS", "/tmp/fake-key.json")
 os.environ.setdefault("GCP_PROJECT_ID", "test-project")
 os.environ.setdefault("ANTHROPIC_API_KEY", "sk-ant-test")
-os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///./test.db")
+os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 os.environ.setdefault("API_KEY", "test-api-key")
 os.environ.setdefault("CORS_ORIGINS", '["http://localhost:3000"]')
+os.environ.setdefault("RETENTION_DAYS", "30")
+os.environ.setdefault("INGESTION_BATCH_SIZE", "10000")
 
 from app.db.models import Base
 from app.db.session import get_async_session
@@ -32,6 +33,16 @@ from app.main import create_app
 @pytest.fixture(scope="session")
 def anyio_backend():
     return "asyncio"
+
+
+@pytest.fixture(autouse=True)
+def clear_settings_cache():
+    """Clear settings cache before each test to ensure env vars are reloaded."""
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 @pytest.fixture
@@ -49,9 +60,7 @@ async def db_engine():
 @pytest.fixture
 async def db_session(db_engine):
     """Yield a test database session."""
-    factory = async_sessionmaker(
-        bind=db_engine, class_=AsyncSession, expire_on_commit=False
-    )
+    factory = async_sessionmaker(bind=db_engine, class_=AsyncSession, expire_on_commit=False)
     async with factory() as session:
         yield session
         await session.rollback()
@@ -77,6 +86,21 @@ def mock_anthropic_client():
 @pytest.fixture
 def app(db_session, mock_bq_client, mock_anthropic_client):
     """Create a test FastAPI app with mocked dependencies."""
+    # Clear settings cache to ensure fresh settings
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
+
+    # Force environment variables to take precedence over .env file
+    import os
+
+    os.environ["API_KEY"] = "test-api-key"
+
+    # Load settings (will read from .env first, then override with env vars)
+    settings = get_settings()
+    # Override the api_key to ensure test value is used
+    settings.api_key = "test-api-key"
+
     test_app = create_app()
 
     # Override dependencies

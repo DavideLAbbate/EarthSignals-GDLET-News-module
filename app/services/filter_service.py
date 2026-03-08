@@ -120,8 +120,16 @@ def _merge_structured_filters(
         [_normalize_geo_country_code(country) for country in raw_filters.countries],
     )
 
-    actor1_country_code = _normalize_actor_country_code(raw_filters.actors.actor1_country) if raw_filters.actors else None
-    actor2_country_code = _normalize_actor_country_code(raw_filters.actors.actor2_country) if raw_filters.actors else None
+    actor1_country_code = (
+        _normalize_actor_country_code(raw_filters.actors.actor1_country)
+        if raw_filters.actors
+        else None
+    )
+    actor2_country_code = (
+        _normalize_actor_country_code(raw_filters.actors.actor2_country)
+        if raw_filters.actors
+        else None
+    )
 
     return normalized.model_copy(
         update={
@@ -142,7 +150,9 @@ def _merge_structured_filters(
                 raw_filters.event_codes.full_codes if raw_filters.event_codes else []
             ),
             "quad_classes": sorted(set(raw_filters.quad_classes)),
-            "source_domains": _normalize_domains(raw_filters.source.domains if raw_filters.source else []),
+            "source_domains": _normalize_domains(
+                raw_filters.source.domains if raw_filters.source else []
+            ),
             "tone_min": raw_filters.sentiment.tone_min if raw_filters.sentiment else None,
             "tone_max": raw_filters.sentiment.tone_max if raw_filters.sentiment else None,
             "goldstein_min": raw_filters.sentiment.goldstein_min if raw_filters.sentiment else None,

@@ -12,7 +12,6 @@ once at startup and shut down cleanly on application shutdown.
 from __future__ import annotations
 
 import asyncio
-import functools
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -38,7 +37,9 @@ class BigQueryClientWrapper:
         self._executor = executor
 
     async def run_query(
-        self, query: str, query_params: list[bigquery.ScalarQueryParameter | bigquery.ArrayQueryParameter]
+        self,
+        query: str,
+        query_params: list[bigquery.ScalarQueryParameter | bigquery.ArrayQueryParameter],
     ) -> list[dict[str, Any]]:
         """
         Execute a BigQuery query asynchronously.

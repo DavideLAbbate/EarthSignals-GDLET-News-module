@@ -23,7 +23,9 @@ class DateRange(BaseModel):
     @model_validator(mode="after")
     def validate_range(self) -> "DateRange":
         if self.from_year > self.to_year:
-            raise ValueError(f"date_range.from ({self.from_year}) must be <= date_range.to ({self.to_year})")
+            raise ValueError(
+                f"date_range.from ({self.from_year}) must be <= date_range.to ({self.to_year})"
+            )
         return self
 
 
@@ -37,7 +39,11 @@ class SentimentFilterInput(BaseModel):
 
     @model_validator(mode="after")
     def validate_ranges(self) -> "SentimentFilterInput":
-        if self.tone_min is not None and self.tone_max is not None and self.tone_min > self.tone_max:
+        if (
+            self.tone_min is not None
+            and self.tone_max is not None
+            and self.tone_min > self.tone_max
+        ):
             raise ValueError("sentiment.tone_min must be <= sentiment.tone_max")
         if (
             self.goldstein_min is not None
@@ -67,7 +73,9 @@ class ImpactFilterInput(BaseModel):
     min_articles: int | None = Field(default=None, ge=0)
 
     def has_any_filter(self) -> bool:
-        return any(value is not None for value in [self.min_mentions, self.min_sources, self.min_articles])
+        return any(
+            value is not None for value in [self.min_mentions, self.min_sources, self.min_articles]
+        )
 
 
 class ActorFilterInput(BaseModel):
@@ -169,7 +177,9 @@ class RawFilterInput(BaseModel):
         if self.country:
             d["country"] = self.country.lower().strip()
         if self.countries:
-            d["countries"] = sorted(country.lower().strip() for country in self.countries if country.strip())
+            d["countries"] = sorted(
+                country.lower().strip() for country in self.countries if country.strip()
+            )
         if self.event_type:
             d["event_type"] = self.event_type.lower().strip()
         if self.macro_topic:
@@ -187,7 +197,9 @@ class RawFilterInput(BaseModel):
                 for key, value in self.actors.model_dump(exclude_none=True).items()
             }
         if self.source and self.source.has_any_filter():
-            d["source_domains"] = sorted(domain.lower().strip() for domain in self.source.domains if domain.strip())
+            d["source_domains"] = sorted(
+                domain.lower().strip() for domain in self.source.domains if domain.strip()
+            )
         if self.event_codes and self.event_codes.has_any_filter():
             d["event_codes"] = {
                 key: sorted(value)
@@ -236,10 +248,13 @@ class ClaudeFilterResponse(BaseModel):
 
 class NormalizedFilters(BaseModel):
     """
-    The fully normalized filter structure used to build BigQuery queries.
+    Normalized search filters - backend-agnostic.
 
-    Free-text filters are normalized by Claude; structured filters are
-    copied through after validation and lightweight code normalization.
+    These filters represent canonical search intent, independent of the
+    underlying query engine. Use PostgresQueryCompiler for local PostgreSQL
+    queries, or BigQueryCompiler for upstream ingestion queries.
+
+    All fields are optional - omit fields to skip that filter dimension.
     """
 
     cameo_country_code: str | None = None

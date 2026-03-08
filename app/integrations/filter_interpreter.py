@@ -36,13 +36,11 @@ _CAMEO_CODES_REFERENCE = "\n".join(
 )
 
 _CAMEO_COUNTRY_SAMPLE = "\n".join(
-    f"  {name.title()}: {code}"
-    for name, code in list(CAMEO_COUNTRY_CODES.items())[:30]
+    f"  {name.title()}: {code}" for name, code in list(CAMEO_COUNTRY_CODES.items())[:30]
 )
 
 _FIPS_COUNTRY_SAMPLE = "\n".join(
-    f"  {name.title()}: {code}"
-    for name, code in list(FIPS_COUNTRY_CODES.items())[:30]
+    f"  {name.title()}: {code}" for name, code in list(FIPS_COUNTRY_CODES.items())[:30]
 )
 
 SYSTEM_PROMPT = f"""You are a GDELT 2.0 dataset filter normalization engine.
@@ -143,10 +141,14 @@ async def interpret_filters(
             logger.info("anthropic_response_received", response_length=len(raw_text))
             return _parse_and_validate_response(raw_text, raw_filters)
 
-        except (anthropic.RateLimitError, anthropic.APIStatusError, anthropic.APIConnectionError) as exc:
+        except (
+            anthropic.RateLimitError,
+            anthropic.APIStatusError,
+            anthropic.APIConnectionError,
+        ) as exc:
             last_error = exc
             if attempt < max_retries:
-                wait_seconds = 2 ** attempt  # exponential backoff: 1s, 2s, 4s
+                wait_seconds = 2**attempt  # exponential backoff: 1s, 2s, 4s
                 logger.warning(
                     "anthropic_transient_error_retry",
                     attempt=attempt + 1,
@@ -159,7 +161,7 @@ async def interpret_filters(
         except anthropic.APITimeoutError as exc:
             last_error = exc
             if attempt < max_retries:
-                wait_seconds = 2 ** attempt
+                wait_seconds = 2**attempt
                 logger.warning(
                     "anthropic_timeout_retry",
                     attempt=attempt + 1,
@@ -202,7 +204,9 @@ def _build_user_prompt(raw_filters: RawFilterInput) -> str:
     )
 
 
-def _parse_and_validate_response(raw_text: str, raw_filters: RawFilterInput) -> ClaudeFilterResponse:
+def _parse_and_validate_response(
+    raw_text: str, raw_filters: RawFilterInput
+) -> ClaudeFilterResponse:
     """
     Parse Claude's text response as JSON and validate against ClaudeFilterResponse.
 
@@ -212,9 +216,7 @@ def _parse_and_validate_response(raw_text: str, raw_filters: RawFilterInput) -> 
     clean_text = raw_text.strip()
     if clean_text.startswith("```"):
         lines = clean_text.split("\n")
-        clean_text = "\n".join(
-            line for line in lines if not line.startswith("```")
-        ).strip()
+        clean_text = "\n".join(line for line in lines if not line.startswith("```")).strip()
 
     try:
         data = json.loads(clean_text)

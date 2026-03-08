@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 from functools import lru_cache
-from typing import Annotated
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -53,6 +52,11 @@ class Settings(BaseSettings):
 
     # ── Scheduler ────────────────────────────────────────────────────────
     sync_interval_minutes: int = Field(default=15, ge=1, le=60)
+
+    # ── Event Store / Ingestion ──────────────────────────────────────────
+    retention_days: int = Field(default=30, ge=1, le=365)
+    ingestion_interval_minutes: int = Field(default=60, ge=5, le=1440)
+    ingestion_batch_size: int = Field(default=10_000, ge=100, le=100_000)
 
     # ── Rate Limiting ─────────────────────────────────────────────────────
     rate_limit_per_minute: int = Field(default=10, ge=1, le=1000)

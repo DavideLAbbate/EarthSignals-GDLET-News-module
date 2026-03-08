@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from app.core.exceptions import BigQueryError, SyncError
+from app.core.exceptions import BigQueryError
 from app.core.logging import get_logger
 from app.db.repositories.sync_repository import upsert_sync_state
 from app.db.session import _get_session_factory

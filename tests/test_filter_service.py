@@ -8,7 +8,7 @@ missing fields, and Claude timeout (AnthropicUnavailableError).
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -17,15 +17,17 @@ from app.schemas.filters import DateRange, RawFilterInput
 from app.services.filter_service import normalize_filters
 
 
-VALID_CLAUDE_RESPONSE = json.dumps({
-    "cameo_country_code": "ITA",
-    "fips_country_code": "IT",
-    "event_root_codes": ["14"],
-    "event_base_codes": ["141", "143"],
-    "date_from_sqldate": 20180101,
-    "date_to_sqldate": 20241231,
-    "normalization_notes": "Italy protest events about energy policy",
-})
+VALID_CLAUDE_RESPONSE = json.dumps(
+    {
+        "cameo_country_code": "ITA",
+        "fips_country_code": "IT",
+        "event_root_codes": ["14"],
+        "event_base_codes": ["141", "143"],
+        "date_from_sqldate": 20180101,
+        "date_to_sqldate": 20241231,
+        "normalization_notes": "Italy protest events about energy policy",
+    }
+)
 
 
 def _make_anthropic_mock(response_text: str):
@@ -77,14 +79,16 @@ async def test_normalize_filters_malformed_json(db_session):
 async def test_normalize_filters_missing_required_field(db_session):
     """Claude response missing required field → FilterInterpretationError."""
     # date_from_sqldate is required — omit it
-    partial_response = json.dumps({
-        "cameo_country_code": "DEU",
-        "fips_country_code": "GM",
-        "event_root_codes": ["14"],
-        "event_base_codes": [],
-        # Missing date_from_sqldate and date_to_sqldate
-        "normalization_notes": "test",
-    })
+    partial_response = json.dumps(
+        {
+            "cameo_country_code": "DEU",
+            "fips_country_code": "GM",
+            "event_root_codes": ["14"],
+            "event_base_codes": [],
+            # Missing date_from_sqldate and date_to_sqldate
+            "normalization_notes": "test",
+        }
+    )
     raw = RawFilterInput(country="Germany")
     client = _make_anthropic_mock(partial_response)
 
@@ -95,15 +99,19 @@ async def test_normalize_filters_missing_required_field(db_session):
 async def test_normalize_filters_cache_hit(db_session):
     """Second call with same filters uses cache, not Claude."""
     raw = RawFilterInput(country="France")
-    client = _make_anthropic_mock(json.dumps({
-        "cameo_country_code": "FRA",
-        "fips_country_code": "FR",
-        "event_root_codes": ["14"],
-        "event_base_codes": [],
-        "date_from_sqldate": 20150101,
-        "date_to_sqldate": 20261231,
-        "normalization_notes": "France",
-    }))
+    client = _make_anthropic_mock(
+        json.dumps(
+            {
+                "cameo_country_code": "FRA",
+                "fips_country_code": "FR",
+                "event_root_codes": ["14"],
+                "event_base_codes": [],
+                "date_from_sqldate": 20150101,
+                "date_to_sqldate": 20261231,
+                "normalization_notes": "France",
+            }
+        )
+    )
 
     # First call — hits Claude
     result1 = await normalize_filters(raw, db_session, client)
@@ -121,9 +129,7 @@ async def test_normalize_filters_anthropic_unavailable_propagates(db_session):
     """AnthropicUnavailableError from interpreter propagates correctly."""
     raw = RawFilterInput(country="Syria")
     client = AsyncMock()
-    client.messages.create = AsyncMock(
-        side_effect=AnthropicUnavailableError("Anthropic API down")
-    )
+    client.messages.create = AsyncMock(side_effect=AnthropicUnavailableError("Anthropic API down"))
 
     with pytest.raises(AnthropicUnavailableError):
         await normalize_filters(raw, db_session, client)

@@ -1,285 +1,151 @@
-# AGENTS.md — Coding Agent Reference
+# AGENTS.md - Repository Guidance For Coding Agents
 
-This file documents build/test commands, code style conventions, and architectural patterns
-for the `gdelt-news-backend` project (Python 3.11+, FastAPI, async SQLAlchemy, BigQuery, Anthropic).
+Repository-specific guidance for agentic coding tools working in
+`web-journal-news-module` (`gdelt-news-backend`).
 
----
+This is a Python 3.11+ FastAPI backend that:
+- queries GDELT 2.0 through Google BigQuery,
+- uses Anthropic to normalize free-text filters,
+- caches normalized filters in PostgreSQL,
+- exposes authenticated REST endpoints,
+- runs a periodic APScheduler sync job.
 
-## Project Overview
+## Rule Files
+- No `.cursorrules` file found.
+- No `.cursor/rules/` directory found.
+- No `.github/copilot-instructions.md` file found.
+- Follow this file and nearby code patterns first.
 
-A production FastAPI backend that queries GDELT 2.0 via Google BigQuery, uses Claude (Anthropic)
-to interpret natural-language news filters, caches results in PostgreSQL, and runs a 15-minute
-background sync job via APScheduler. Authentication is X-API-Key header-based.
+## Project Layout
+- `app/api/` - routes, dependencies, auth checks, error handlers
+- `app/services/` - orchestration and business logic
+- `app/integrations/` - BigQuery, Anthropic, query building, mapping helpers
+- `app/db/` - models, session management, repositories
+- `app/core/` - settings, logging, exceptions
+- `app/scheduler/` - scheduler wiring and sync job
+- `app/schemas/` - Pydantic request/response models
+- `tests/` - pytest suite with mocked external services
+- `alembic/versions/` - database migrations
 
-Key layers: `app/api/` → `app/services/` → `app/integrations/` + `app/db/`.
-
----
-
-## Build & Run Commands
-
+## Install, Build, And Run
 ```bash
-# Install all dependencies (including dev extras)
 pip install -e ".[dev]"
-
-# Run the development server
 uvicorn app.main:create_app --factory --reload --port 8000
-
-# Run via Docker Compose (PostgreSQL + app)
 docker-compose up --build
-
-# Apply database migrations
 alembic upgrade head
-
-# Generate a new migration
 alembic revision --autogenerate -m "description"
 ```
 
----
+Notes:
+- `pyproject.toml` uses `hatchling` as the build backend.
+- There is no separate frontend build pipeline.
+- For verification, lint + targeted tests are usually more useful than packaging.
 
-## Test Commands
-
+## Lint And Format
 ```bash
-# Run all tests
-pytest
-
-# Run all tests with verbose output
-pytest -v
-
-# Run a single test file
-pytest tests/test_api_events.py
-
-# Run a single test function  ← most common during development
-pytest tests/test_api_events.py::test_search_events_success
-
-# Run tests matching a keyword pattern
-pytest -k "test_filter"
-
-# Run tests with stdout shown (useful for debugging)
-pytest -s -v
-
-# Run with short traceback
-pytest --tb=short
-```
-
-**Test setup requirements:** Before tests run, `conftest.py` sets environment variables
-(`API_KEY`, `DATABASE_URL`, `ANTHROPIC_API_KEY`, `GCP_PROJECT_ID`, etc.) *before* importing
-any `app.*` modules. Never import app modules at module level in test files — always inside
-fixtures or test functions, or after env vars are guaranteed to be set.
-
----
-
-## Linting & Formatting
-
-```bash
-# Lint with Ruff (configured in pyproject.toml)
 ruff check .
-
-# Auto-fix lint issues
 ruff check --fix .
-
-# Format with Ruff
 ruff format .
-
-# Check formatting without writing
 ruff format --check .
 ```
 
-Ruff is the sole linter/formatter. No Black, Flake8, or isort. Line length: **100 characters**.
-Target: `py311`. Ruff must be installed separately (`pip install ruff`) — it is not in dev deps.
+- Ruff is the only configured formatter/linter.
+- Ruff config lives in `pyproject.toml`.
+- Line length is `100`; target version is `py311`.
 
----
-
-## Code Style Guidelines
-
-### File Structure
-
-Every Python source file must start with:
-1. A module-level docstring explaining purpose, dependencies, and design decisions
-2. `from __future__ import annotations` (always first import)
-3. Standard import groups (see below)
-
-```python
-"""
-Short one-liner description.
-
-Longer explanation of responsibilities, external dependencies,
-and any non-obvious design decisions.
-"""
-from __future__ import annotations
-
-import asyncio                          # stdlib
-from functools import lru_cache
-
-import structlog                        # third-party
-from fastapi import Depends, HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.core.config import get_settings  # internal (absolute, never relative)
-from app.core.exceptions import QueryValidationError
+## Test Commands
+```bash
+pytest
+pytest -v
+pytest tests/test_api_events.py
+pytest tests/test_api_events.py::test_search_events_success -v
+pytest -k "filter" -v
+pytest -s -v
+pytest --tb=short
 ```
 
-### Import Conventions
-
-- **Order:** `from __future__` → stdlib → third-party → `app.*` internal
-- **Always absolute imports** — never use relative imports (no `from .module import ...`)
-- **No wildcard imports** (`from module import *`)
-
-### Type Annotations
-
-- Full type annotations on all function signatures and class attributes
-- Use `str | None` (union syntax) over `Optional[str]` — Python 3.10+ style
-- Use `list[str]`, `dict[str, Any]` (lowercase generics) over `List[str]`, `Dict[str, Any]`
-- Use `tuple[str, list]` for return types
-- `Any` from `typing` is acceptable when the type is genuinely unknown
-
-### Naming Conventions
-
-| Kind | Convention | Example |
-|---|---|---|
-| Modules | `snake_case` | `gdelt_query_builder.py` |
-| Classes | `PascalCase` | `BigQueryClientWrapper`, `SyncState` |
-| Functions / methods | `snake_case` | `build_events_query`, `get_async_session` |
-| Constants | `UPPER_SNAKE_CASE` | `CAMEO_COUNTRY_CODES`, `MAX_RETRIES` |
-| Variables / args | `snake_case` | `fips_country_code`, `date_from_sqldate` |
-| Private helpers | leading `_` | `_api_key_scheme`, `_get_session_factory` |
-| Unused return values (FastAPI deps) | `_` | `_: str = Depends(verify_api_key)` |
-
-### Pydantic Models (v2 API)
-
-- Inherit `BaseModel`; use `Field(...)` with `description=` for required fields
-- Use `model_validate(data)` — never `.parse_obj()`
-- Use `.model_dump()` — never `.dict()`
-- Use `@model_validator(mode="after")` for cross-field validation
-- Use `@field_validator("field", mode="before")` for preprocessing
-- Settings models use `SettingsConfigDict(env_file=".env", ...)`
-
-### Function Signatures
-
-Use keyword-only arguments (`*`) for factory and builder functions with multiple parameters
-to avoid positional ordering mistakes:
-
-```python
-def build_events_query(
-    *,
-    date_from_sqldate: int,
-    date_to_sqldate: int,
-    fips_country_code: str | None = None,
-    cameo_event_code: str | None = None,
-) -> tuple[str, list]:
-```
-
-### Logging
-
-Use `structlog` throughout. Never use `print()` or `logging.getLogger()`.
-
-```python
-logger = structlog.get_logger(__name__)   # module-level, not class-level
-
-# Always use key=value pairs; event name in snake_case
-logger.info("gdelt_query_start", date_from=date_from, country=fips_country_code)
-logger.warning("filter_cache_corrupted", cache_key=cache_key[:8])
-logger.error("bigquery_query_failed", error=str(exc))
-```
-
-### Error Handling
-
-**Domain exceptions** all inherit `GDELTBackendError` (in `app/core/exceptions.py`).
-Raise domain exceptions from service/integration layers; never raise `HTTPException` there.
-`app/api/error_handlers.py` maps domain exceptions to HTTP status codes globally.
-
-```python
-# Guard clause + raise domain exception (preferred over nested if/else)
-if not raw_filters.has_any_filter():
-    raise FilterInterpretationError(
-        "At least one filter field must be provided",
-        detail="Supply country, event_type, or date_range",
-    )
-
-# Non-fatal errors: log + continue, do not re-raise
-try:
-    await upsert_cached_filter(session, cache_key, result)
-except Exception as exc:
-    logger.warning("filter_cache_write_failed", error=str(exc))
-    # intentionally not re-raised; cache write failure is non-fatal
-```
-
-### Singleton / Dependency Injection Pattern
-
-Use `@lru_cache(maxsize=1)` for singleton factories. Wire everything through FastAPI `Depends`.
-
-```python
-@lru_cache(maxsize=1)
-def get_settings() -> Settings:
-    return Settings()
-```
-
-### Async Patterns
-
-- All I/O must be `async` — use `await` for database, Anthropic, and scheduler calls
-- BigQuery SDK is synchronous — wrap calls in `asyncio.get_event_loop().run_in_executor(None, ...)`
-  or a `ThreadPoolExecutor` (see `app/integrations/bigquery_client.py`)
-- Database sessions via `async with factory() as session:` context managers
-- `asyncio_mode = "auto"` in pytest config — all `async def test_*` are collected automatically
-
-### Visual Code Organization
-
-Use section dividers for logical grouping within longer files:
-
-```python
-# ── Public interface ──────────────────────────────────────────────────────
-# ── Private helpers ───────────────────────────────────────────────────────
-# ── Database models ───────────────────────────────────────────────────────
-```
-
----
+Single-test guidance:
+- Prefer `pytest path/to/file.py::test_name -v` for the smallest useful loop.
+- If you change validation or error mapping, run the focused test plus the related route test.
+- Keep BigQuery and Anthropic fully mocked in tests.
 
 ## Testing Conventions
+- `pytest` is configured with `asyncio_mode = "auto"`.
+- `tests/conftest.py` sets required env vars before importing `app.*` modules.
+- Test DB is in-memory SQLite: `sqlite+aiosqlite:///:memory:`.
+- Prefer `httpx.AsyncClient` for async route tests.
+- Reuse fixtures like `async_client`, `api_headers`, `db_session`, `mock_bq_client`,
+  and `mock_anthropic_client`.
+- Avoid module-level imports of app code in tests unless env vars are already prepared.
 
-- **Framework:** `pytest` + `pytest-asyncio` (`asyncio_mode = "auto"`)
-- **Test DB:** SQLite in-memory (`sqlite+aiosqlite:///:memory:`) — never PostgreSQL in tests
-- **HTTP client:** `httpx.AsyncClient` for async route tests; `fastapi.testclient.TestClient`
-  for synchronous error-handler tests
-- **External services:** Always mocked — BigQuery and Anthropic clients are replaced by
-  `MagicMock` / `AsyncMock` via `conftest.py` fixtures and FastAPI dependency overrides
+## Python Module Structure
+- Start non-trivial Python modules with a module docstring.
+- Follow the docstring with `from __future__ import annotations`.
+- Group imports in this order: future, stdlib, third-party, `app.*`.
+- Use absolute imports only; do not add relative imports or wildcard imports.
 
-### Key Fixtures (from `tests/conftest.py`)
+## Formatting And Style
+- Match existing Ruff formatting; do not add a second formatter.
+- Keep lines within `100` characters when practical.
+- Prefer small, local edits over broad rewrites.
+- Preserve existing file structure and section-divider comment style in longer modules.
+- Add comments only when the code is not self-explanatory.
+- Keep route handlers thin; move orchestration into services.
 
-| Fixture | Scope | Purpose |
-|---|---|---|
-| `db_engine` | function | In-memory SQLite async engine, creates/drops tables |
-| `db_session` | function | `AsyncSession` that rolls back after each test |
-| `mock_bq_client` | function | `MagicMock` with `run_query = AsyncMock(return_value=[])` |
-| `mock_anthropic_client` | function | `AsyncMock()` for Anthropic client |
-| `app` | function | Full `FastAPI` app with all dependency overrides applied |
-| `async_client` | function | `httpx.AsyncClient(app=app, base_url="http://test")` |
-| `api_headers` | function | `{"X-API-Key": "test-api-key"}` |
+## Types And Naming
+- Annotate all function signatures.
+- Prefer builtin generics like `list[str]` and `dict[str, Any]`.
+- Prefer `str | None` over `Optional[str]`.
+- Use precise return types for helpers, repositories, services, and integrations.
+- Reuse typed schema models instead of passing untyped dictionaries around.
+- modules/functions/variables: `snake_case`
+- classes: `PascalCase`
+- constants: `UPPER_SNAKE_CASE`
+- private helpers: leading underscore
+- log event names: short `snake_case` strings
 
-### Anthropic Mock Pattern (used across test files)
+## Pydantic And Settings
+- This codebase uses Pydantic v2.
+- Use `Field(...)` constraints and descriptions for API-facing schemas.
+- Prefer `model_validate(...)` over legacy parsing helpers.
+- Prefer `model_dump(...)` over `.dict()`.
+- Use `@model_validator(mode="after")` for cross-field validation.
+- Use `@field_validator(..., mode="before")` when preprocessing raw values.
+- Reuse `get_settings()` from `app/core/config.py` instead of reading env vars ad hoc.
 
-```python
-def _make_anthropic_mock(response_text: str):
-    mock_message = MagicMock()
-    mock_message.content = [MagicMock(text=response_text)]
-    client = AsyncMock()
-    client.messages.create = AsyncMock(return_value=mock_message)
-    return client
-```
+## FastAPI, Services, And Boundaries
+- Prefer dependency injection via `Depends(...)` and app state.
+- Keep HTTP concerns in `app/api/` and business logic in `app/services/`.
+- Reuse repository helpers in `app/db/repositories/` instead of embedding SQL in routes.
+- Reuse integration wrappers; do not call external SDKs directly from route handlers.
+- `app/main.py` owns app creation, lifespan startup, and shutdown wiring.
 
-### Exception Assertion
+## Error Handling
+- Business/domain exceptions should inherit from `GDELTBackendError`.
+- Add new domain exceptions in `app/core/exceptions.py`.
+- Map them centrally in `app/api/error_handlers.py`.
+- API/dependency modules may raise `HTTPException` for request-layer concerns.
+- Services and integrations should raise domain exceptions instead of FastAPI exceptions.
+- Prefer guard clauses and explicit validation over deep nesting.
+- For non-fatal side effects, log the failure and continue when that matches existing behavior.
 
-```python
-with pytest.raises(FilterInterpretationError, match="At least one filter field"):
-    await normalize_filters(raw, db_session, client)
-```
+## Logging
+- Use `structlog` through `app.core.logging.get_logger(...)`.
+- Do not add `print()` for runtime diagnostics.
+- Log event-style messages with structured key/value fields.
+- Keep logs concise and useful for debugging async flows.
 
----
+## Async, Database, And Integrations
+- Treat I/O paths as async.
+- SQLAlchemy sessions are async; follow existing async session patterns.
+- BigQuery's Python client is synchronous; keep calls behind the existing wrapper/executor.
+- Anthropic calls should stay inside the integration layer.
+- Scheduler behavior belongs in `app/scheduler/`, not API routes.
 
-## Architecture Notes
-
-- `app/core/config.py` — single `Settings` class (pydantic-settings); use `get_settings()` everywhere
-- `app/core/exceptions.py` — all domain exceptions; add new ones here, wire handler in `error_handlers.py`
-- `app/api/dependencies.py` — FastAPI dependencies for auth, DB session, BQ client, Anthropic client
-- `app/db/repositories/` — all raw DB access; services call repositories, routes call services
-- `app/integrations/` — third-party SDK wrappers (BQ, Anthropic, GDELT query/result logic)
-- `app/scheduler/sync_job.py` — 15-minute background GDELT sync; uses its own DB session factory
-- Alembic migrations live in `alembic/versions/`; DB URL is injected at runtime from `settings`
+## Agent Workflow Guidance
+- Inspect nearby modules and tests before changing behavior.
+- Follow existing conventions first; this repo values consistency over novelty.
+- When adding or changing behavior, update tests first or alongside the implementation.
+- When touching validation, verify both schema behavior and route-level responses.
+- Avoid adding new tooling, formatting systems, or architectural layers unless asked.
+- If work touches external integrations, keep tests mocked and focused on repository logic.

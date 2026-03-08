@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from app.schemas.filters import NormalizedFilters, RawFilterInput
+from app.schemas.filters import NormalizedFilters
 
 
 class GDELTEvent(BaseModel):
@@ -32,8 +32,8 @@ class GDELTEvent(BaseModel):
     quad_class: int | None = None
 
     # Sentiment/impact scores
-    goldstein_scale: float | None = None   # -10.0 (destabilizing) to +10.0 (stabilizing)
-    tone: float | None = None              # AvgTone: article sentiment
+    goldstein_scale: float | None = None  # -10.0 (destabilizing) to +10.0 (stabilizing)
+    tone: float | None = None  # AvgTone: article sentiment
 
     # Coverage metrics
     num_mentions: int | None = None
@@ -54,8 +54,8 @@ class ResponseMetadata(BaseModel):
 
     total_results: int
     query_time_ms: int = 0
-    last_gdelt_sync: str | None = None       # ISO 8601 UTC
-    mapping_version: str | None = None       # ISO 8601 UTC
+    last_gdelt_sync: str | None = None  # ISO 8601 UTC
+    mapping_version: str | None = None  # ISO 8601 UTC
     bq_bytes_processed: int | None = None
 
 

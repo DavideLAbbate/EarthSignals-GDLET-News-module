@@ -10,7 +10,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, BigInteger, DateTime, Integer, String, Text
+from sqlalchemy import JSON, BigInteger, DateTime, Float, Index, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -52,9 +52,7 @@ class SyncState(Base):
     )
 
     # Whether the sync succeeded
-    sync_status: Mapped[str] = mapped_column(
-        String(20), nullable=False, default="success"
-    )
+    sync_status: Mapped[str] = mapped_column(String(20), nullable=False, default="success")
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
@@ -68,9 +66,7 @@ class FilterMappingCache(Base):
 
     __tablename__ = "filter_mapping_cache"
 
-    id: Mapped[str] = mapped_column(
-        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
-    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
 
     # SHA256 of canonical filter input JSON
     cache_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
@@ -84,6 +80,59 @@ class FilterMappingCache(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=datetime.utcnow
     )
-    expires_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class GdeltEvent(Base):
+    """
+    Stores individual GDELT event records for local querying and caching.
+
+    Each row represents a single event from the GDELT 2.0 dataset.
+    The primary key is GDELT's GLOBALEVENTID (not auto-incremented).
+    """
+
+    __tablename__ = "gdelt_events"
+    __table_args__ = (
+        Index("ix_gdelt_events_geo_date", "action_geo_country_code", "sql_date"),
+        Index("ix_gdelt_events_event_date", "event_root_code", "sql_date"),
     )
+
+    global_event_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    sql_date: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    date_added: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    actor1_country_code: Mapped[str | None] = mapped_column(String(3), nullable=True)
+    actor2_country_code: Mapped[str | None] = mapped_column(String(3), nullable=True)
+    event_code: Mapped[str | None] = mapped_column(String(4), nullable=True)
+    event_base_code: Mapped[str | None] = mapped_column(String(3), nullable=True)
+    event_root_code: Mapped[str | None] = mapped_column(String(2), nullable=True, index=True)
+    quad_class: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    goldstein_scale: Mapped[float | None] = mapped_column(Float, nullable=True)
+    avg_tone: Mapped[float | None] = mapped_column(Float, nullable=True)
+    num_mentions: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    num_sources: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    num_articles: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    action_geo_full_name: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    action_geo_country_code: Mapped[str | None] = mapped_column(
+        String(2), nullable=True, index=True
+    )
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class IngestionState(Base):
+    """
+    Tracks the state of GDELT event ingestion runs.
+
+    Each row represents a single ingestion job (bootstrap or incremental).
+    Used to track progress, watermarks, and success/failure status.
+    """
+
+    __tablename__ = "ingestion_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ingestion_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="running")
+    watermark_dateadded: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    events_ingested: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
