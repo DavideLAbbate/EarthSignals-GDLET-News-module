@@ -77,7 +77,7 @@ async def lifespan(app: FastAPI):
     # Run async to not block startup — errors are handled inside sync_job
     if settings.enable_metadata_sync:
         asyncio.create_task(trigger_sync_now(bq_client))
-    asyncio.create_task(trigger_startup_ingestion_if_needed(bq_client))
+    asyncio.create_task(trigger_startup_ingestion_if_needed())
 
     logger.info("application_ready")
     yield

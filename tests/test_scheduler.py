@@ -26,7 +26,7 @@ async def test_trigger_startup_ingestion_runs_bootstrap_when_needed(db_session):
     ):
         mock_factory.return_value = lambda: mock_factory_instance
 
-        await scheduler.trigger_startup_ingestion_if_needed(MagicMock())
+        await scheduler.trigger_startup_ingestion_if_needed()
 
     run_bootstrap.assert_awaited_once()
 
@@ -65,6 +65,6 @@ async def test_trigger_startup_ingestion_skips_bootstrap_when_events_exist(db_se
     ):
         mock_factory.return_value = lambda: mock_factory_instance
 
-        await scheduler.trigger_startup_ingestion_if_needed(MagicMock())
+        await scheduler.trigger_startup_ingestion_if_needed()
 
     run_bootstrap.assert_not_awaited()

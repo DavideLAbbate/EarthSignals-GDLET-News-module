@@ -85,7 +85,7 @@ def add_sync_job(scheduler: AsyncIOScheduler, bq_client) -> None:
 
     # Ingestion job - hourly incremental
     scheduler.add_job(
-        partial(run_ingestion_job, bq_client, session_factory, "incremental"),
+        partial(run_ingestion_job, session_factory, "incremental"),
         "interval",
         minutes=settings.ingestion_interval_minutes,
         id="gdelt_incremental_ingestion",
@@ -119,7 +119,7 @@ async def trigger_sync_now(bq_client) -> None:
     await run_gdelt_sync(bq_client)
 
 
-async def trigger_startup_ingestion_if_needed(bq_client) -> None:
+async def trigger_startup_ingestion_if_needed() -> None:
     """Run the initial bootstrap ingestion once when local event storage is empty."""
     session_factory = _get_session_factory()
 
@@ -129,22 +129,19 @@ async def trigger_startup_ingestion_if_needed(bq_client) -> None:
             return
 
         logger.info("startup_bootstrap_triggered")
-        await run_bootstrap(bq_client, session)
+        await run_bootstrap(session)
 
 
 async def run_ingestion_job(
-    bq_client,
     session_factory: async_sessionmaker[AsyncSession],
     job_type: str = "incremental",
 ) -> dict[str, Any]:
-    """
-    Run an ingestion job (bootstrap or incremental).
-    """
+    """Run an ingestion job (bootstrap or incremental)."""
     async with session_factory() as session:
         if job_type == "bootstrap":
-            return await run_bootstrap(bq_client, session)
+            return await run_bootstrap(session)
         else:
-            return await run_incremental(bq_client, session)
+            return await run_incremental(session)
 
 
 async def run_retention_job(
