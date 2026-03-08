@@ -1,4 +1,4 @@
-"""Tests for ingestion service."""
+"""Tests for ingestion service (GDELT HTTP ingestion)."""
 
 from __future__ import annotations
 
@@ -10,19 +10,20 @@ from app.db.repositories import ingestion_repository
 
 
 @pytest.fixture
-def mock_bq_client():
-    """Create a mock BigQuery client."""
+def mock_gdelt_client():
+    """Create a mock GdeltHttpClient."""
     client = MagicMock()
-    client.run_query = AsyncMock(return_value=[])
+    client.fetch_master_export_urls = AsyncMock(return_value=[])
+    client.fetch_latest_export_url = AsyncMock(
+        return_value=("https://fake/20260308120000.export.CSV.zip", 20260308120000)
+    )
+    client.download_events = AsyncMock(return_value=[])
+    client.close = AsyncMock()
     return client
 
 
-@pytest.mark.asyncio
-async def test_row_to_event_dict():
-    """Test transformation of BQ row to event dict."""
-    from app.services.ingestion_service import _row_to_event_dict
-
-    row = {
+def _make_gdelt_row(**overrides) -> dict:
+    base = {
         "GLOBALEVENTID": 1234567890123,
         "SQLDATE": 20260301,
         "DATEADDED": 20260301000000,
@@ -41,7 +42,16 @@ async def test_row_to_event_dict():
         "ActionGeo_CountryCode": "US",
         "SOURCEURL": "https://example.com",
     }
+    base.update(overrides)
+    return base
 
+
+@pytest.mark.asyncio
+async def test_row_to_event_dict():
+    """Test transformation of GDELT row dict to event dict."""
+    from app.services.ingestion_service import _row_to_event_dict
+
+    row = _make_gdelt_row()
     result = _row_to_event_dict(row)
 
     assert result["global_event_id"] == 1234567890123
@@ -52,46 +62,27 @@ async def test_row_to_event_dict():
 
 
 @pytest.mark.asyncio
-async def test_run_bootstrap_success(mock_bq_client, db_session):
-    """Test successful bootstrap ingestion."""
+async def test_run_bootstrap_success(mock_gdelt_client, db_session):
+    """Bootstrap with one file containing one row records events_ingested == 1."""
     from app.services import ingestion_service
 
-    # Mock BQ to return some rows
-    mock_bq_client.run_query.return_value = [
-        {
-            "GLOBALEVENTID": 1234567890123,
-            "SQLDATE": 20260301,
-            "DATEADDED": 20260301000000,
-            "Actor1CountryCode": "USA",
-            "Actor2CountryCode": "CHN",
-            "EventCode": "042",
-            "EventBaseCode": "04",
-            "EventRootCode": "04",
-            "QuadClass": 2,
-            "GoldsteinScale": 5.0,
-            "AvgTone": -2.5,
-            "NumMentions": 10,
-            "NumSources": 5,
-            "NumArticles": 3,
-            "ActionGeo_FullName": "Washington, DC",
-            "ActionGeo_CountryCode": "US",
-            "SOURCEURL": "https://example.com",
-        },
-    ]
+    mock_gdelt_client.fetch_master_export_urls = AsyncMock(
+        return_value=[("https://fake/20260301000000.export.CSV.zip", 20260301000000)]
+    )
+    mock_gdelt_client.download_events = AsyncMock(return_value=[_make_gdelt_row()])
 
-    with patch.object(ingestion_service, "get_settings") as mock_settings:
+    with (
+        patch.object(ingestion_service, "_get_gdelt_client", return_value=mock_gdelt_client),
+        patch.object(ingestion_service, "get_settings") as mock_settings,
+    ):
         mock_settings.return_value.retention_days = 30
         mock_settings.return_value.ingestion_batch_size = 10000
 
-        result = await ingestion_service.run_bootstrap(
-            mock_bq_client,
-            db_session,
-        )
+        result = await ingestion_service.run_bootstrap(db_session)
 
     assert result["status"] == "completed"
     assert result["events_ingested"] == 1
 
-    # Verify ingestion run was created
     latest = await ingestion_repository.get_latest_successful_ingestion(
         db_session,
         ingestion_repository.IngestionType.BOOTSTRAP,
@@ -100,224 +91,31 @@ async def test_run_bootstrap_success(mock_bq_client, db_session):
 
 
 @pytest.mark.asyncio
-async def test_run_bootstrap_awaits_async_bigquery_client(db_session):
-    """Bootstrap should await the async BigQuery client wrapper directly."""
+async def test_run_bootstrap_no_files(mock_gdelt_client, db_session):
+    """Bootstrap with no files from masterfilelist yields events_ingested == 0 and completed."""
     from app.services import ingestion_service
 
-    mock_bq_client = MagicMock()
-    mock_bq_client.run_query = AsyncMock(
-        return_value=[
-            {
-                "GLOBALEVENTID": 1234567890125,
-                "SQLDATE": 20260301,
-                "DATEADDED": 20260301000000,
-                "Actor1CountryCode": "USA",
-                "SOURCEURL": "https://example.com/async",
-            }
-        ]
-    )
+    # fetch_master_export_urls already returns [] by default in the fixture
 
     with (
+        patch.object(ingestion_service, "_get_gdelt_client", return_value=mock_gdelt_client),
         patch.object(ingestion_service, "get_settings") as mock_settings,
-        patch.object(
-            ingestion_service,
-            "_iter_bootstrap_windows",
-            return_value=[(20260301000000, 20260302000000, 20260301, 20260301)],
-        ),
     ):
         mock_settings.return_value.retention_days = 30
         mock_settings.return_value.ingestion_batch_size = 10000
 
-        result = await ingestion_service.run_bootstrap(
-            mock_bq_client,
-            db_session,
-        )
+        result = await ingestion_service.run_bootstrap(db_session)
 
     assert result["status"] == "completed"
-    assert result["events_ingested"] == 1
-    assert mock_bq_client.run_query.await_count == 1
+    assert result["events_ingested"] == 0
 
 
 @pytest.mark.asyncio
-async def test_run_bootstrap_limits_query_to_retention_window(mock_bq_client, db_session):
-    """Bootstrap should pass SQLDATE bounds to keep BigQuery scans bounded."""
+async def test_run_incremental_downloads_new_file(mock_gdelt_client, db_session):
+    """Incremental downloads a file whose timestamp is newer than the watermark."""
     from app.services import ingestion_service
 
-    with (
-        patch.object(ingestion_service, "get_settings") as mock_settings,
-        patch.object(
-            ingestion_service,
-            "build_ingestion_bootstrap_query",
-            return_value=("SELECT 1", []),
-        ) as build_query,
-    ):
-        mock_settings.return_value.retention_days = 30
-        mock_settings.return_value.ingestion_batch_size = 10000
-
-        await ingestion_service.run_bootstrap(
-            mock_bq_client,
-            db_session,
-        )
-
-    assert build_query.call_args.kwargs["date_from_sqldate"] == int(
-        str(build_query.call_args.kwargs["since_dateadded"])[:8]
-    )
-    assert (
-        build_query.call_args.kwargs["date_from_sqldate"]
-        <= build_query.call_args.kwargs["date_to_sqldate"]
-    )
-
-
-@pytest.mark.asyncio
-async def test_run_incremental_limits_query_to_recent_sqldate_range(mock_bq_client, db_session):
-    """Incremental ingestion should also include SQLDATE bounds."""
-    from app.services import ingestion_service
-
-    with (
-        patch.object(ingestion_service, "get_settings") as mock_settings,
-        patch.object(
-            ingestion_service,
-            "build_ingestion_incremental_query",
-            return_value=("SELECT 1", []),
-        ) as build_query,
-    ):
-        mock_settings.return_value.ingestion_batch_size = 10000
-
-        await ingestion_service.run_incremental(
-            mock_bq_client,
-            db_session,
-        )
-
-    assert build_query.call_args.kwargs["date_from_sqldate"] == int(
-        str(build_query.call_args.kwargs["since_dateadded"])[:8]
-    )
-    assert (
-        build_query.call_args.kwargs["date_from_sqldate"]
-        <= build_query.call_args.kwargs["date_to_sqldate"]
-    )
-
-
-def test_iter_bootstrap_windows_covers_retention_period_without_overlap():
-    """Bootstrap windows should cover the retention period with no overlap."""
-    from datetime import datetime, timezone
-
-    from app.services.ingestion_service import _iter_bootstrap_windows
-
-    start = datetime(2026, 2, 6, 0, 0, tzinfo=timezone.utc)
-    end = datetime(2026, 2, 8, 6, 30, tzinfo=timezone.utc)
-
-    windows = list(_iter_bootstrap_windows(start, end))
-
-    assert len(windows) == 3
-    assert windows[0] == (20260206000000, 20260207000000, 20260206, 20260206)
-    assert windows[1] == (20260207000000, 20260208000000, 20260207, 20260207)
-    assert windows[2] == (20260208000000, 20260208063000, 20260208, 20260208)
-
-
-def test_iter_incremental_windows_preserves_partial_first_day():
-    """Incremental windows should start at the watermark, not midnight."""
-    from datetime import datetime, timezone
-
-    from app.services.ingestion_service import _iter_incremental_windows
-
-    start = datetime(2026, 3, 8, 4, 30, tzinfo=timezone.utc)
-    end = datetime(2026, 3, 10, 6, 0, tzinfo=timezone.utc)
-
-    windows = list(_iter_incremental_windows(start, end))
-
-    assert windows == [
-        (20260308043000, 20260309000000, 20260308, 20260308),
-        (20260309000000, 20260310000000, 20260309, 20260309),
-        (20260310000000, 20260310060000, 20260310, 20260310),
-    ]
-
-
-@pytest.mark.asyncio
-async def test_run_bootstrap_uses_window_bounds_not_open_ended_watermark_paging(
-    mock_bq_client,
-    db_session,
-):
-    """Bootstrap should advance through bounded windows instead of open-ended scans."""
-    from datetime import datetime, timezone
-
-    from app.services import ingestion_service
-
-    with (
-        patch.object(ingestion_service, "get_settings") as mock_settings,
-        patch.object(
-            ingestion_service,
-            "_iter_bootstrap_windows",
-            return_value=[
-                (20260206000000, 20260207000000, 20260206, 20260206),
-                (20260207000000, 20260208000000, 20260207, 20260207),
-            ],
-        ),
-        patch.object(
-            ingestion_service,
-            "build_ingestion_bootstrap_query",
-            return_value=("SELECT 1", []),
-        ) as build_query,
-        patch.object(ingestion_service, "datetime") as mock_datetime,
-    ):
-        mock_settings.return_value.retention_days = 30
-        mock_settings.return_value.ingestion_batch_size = 10000
-        mock_datetime.now.return_value = datetime(2026, 2, 8, 6, 30, tzinfo=timezone.utc)
-        mock_datetime.strptime = datetime.strptime
-
-        await ingestion_service.run_bootstrap(mock_bq_client, db_session)
-
-    assert build_query.call_count == 2
-    first_call = build_query.call_args_list[0].kwargs
-    second_call = build_query.call_args_list[1].kwargs
-    assert first_call["since_dateadded"] == 20260206000000
-    assert second_call["since_dateadded"] == 20260207000000
-
-
-@pytest.mark.asyncio
-async def test_run_incremental_uses_bounded_windows_from_watermark(mock_bq_client, db_session):
-    """Incremental ingestion should step through bounded windows, not one huge range."""
-    from datetime import datetime, timezone
-
-    from app.services import ingestion_service
-
-    with (
-        patch.object(ingestion_service, "get_settings") as mock_settings,
-        patch.object(
-            ingestion_service,
-            "_iter_incremental_windows",
-            return_value=[
-                (20260308043000, 20260309000000, 20260308, 20260308),
-                (20260309000000, 20260309120000, 20260309, 20260309),
-            ],
-        ),
-        patch.object(
-            ingestion_service,
-            "build_ingestion_incremental_query",
-            return_value=("SELECT 1", []),
-        ) as build_query,
-        patch.object(ingestion_service, "datetime") as mock_datetime,
-    ):
-        mock_settings.return_value.ingestion_batch_size = 10000
-        mock_datetime.now.return_value = datetime(2026, 3, 9, 12, 0, tzinfo=timezone.utc)
-        mock_datetime.strptime = datetime.strptime
-
-        await ingestion_service.run_incremental(mock_bq_client, db_session)
-
-    assert build_query.call_count == 2
-    first_call = build_query.call_args_list[0].kwargs
-    second_call = build_query.call_args_list[1].kwargs
-    assert first_call["since_dateadded"] == 20260308043000
-    assert first_call["window_end_dateadded"] == 20260309000000
-    assert second_call["since_dateadded"] == 20260309000000
-    assert second_call["window_end_dateadded"] == 20260309120000
-
-
-@pytest.mark.asyncio
-async def test_run_incremental_with_watermark(mock_bq_client, db_session):
-    """Test incremental ingestion uses existing watermark."""
-    from app.services import ingestion_service
-
-    # First complete a bootstrap
+    # Latest file is at 20260308120000; watermark is from bootstrap at 20260301000000
     bootstrap_run = await ingestion_repository.create_ingestion_run(
         db_session,
         ingestion_repository.IngestionType.BOOTSTRAP,
@@ -327,44 +125,118 @@ async def test_run_incremental_with_watermark(mock_bq_client, db_session):
         bootstrap_run.id,
         ingestion_repository.IngestionStatus.COMPLETED,
         watermark_dateadded=20260301000000,
-        events_ingested=100,
+        events_ingested=0,
     )
     await db_session.commit()
 
-    # Mock BQ for incremental
-    mock_bq_client.run_query.return_value = []
+    mock_gdelt_client.fetch_latest_export_url = AsyncMock(
+        return_value=("https://fake/20260308120000.export.CSV.zip", 20260308120000)
+    )
+    mock_gdelt_client.download_events = AsyncMock(return_value=[_make_gdelt_row()])
 
-    with patch.object(ingestion_service, "get_settings") as mock_settings:
+    with (
+        patch.object(ingestion_service, "_get_gdelt_client", return_value=mock_gdelt_client),
+        patch.object(ingestion_service, "get_settings") as mock_settings,
+    ):
+        mock_settings.return_value.retention_days = 30
         mock_settings.return_value.ingestion_batch_size = 10000
 
-        result = await ingestion_service.run_incremental(
-            mock_bq_client,
-            db_session,
-        )
+        result = await ingestion_service.run_incremental(db_session)
+
+    assert result["events_ingested"] == 1
+    mock_gdelt_client.download_events.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_run_incremental_skips_already_ingested_file(mock_gdelt_client, db_session):
+    """Incremental skips download when the file timestamp is not newer than the watermark."""
+    from app.services import ingestion_service
+
+    # Watermark (20260308130000) is NEWER than the latest file (20260308120000)
+    bootstrap_run = await ingestion_repository.create_ingestion_run(
+        db_session,
+        ingestion_repository.IngestionType.BOOTSTRAP,
+    )
+    await ingestion_repository.update_ingestion_run(
+        db_session,
+        bootstrap_run.id,
+        ingestion_repository.IngestionStatus.COMPLETED,
+        watermark_dateadded=20260308130000,
+        events_ingested=0,
+    )
+    await db_session.commit()
+
+    mock_gdelt_client.fetch_latest_export_url = AsyncMock(
+        return_value=("https://fake/20260308120000.export.CSV.zip", 20260308120000)
+    )
+
+    with (
+        patch.object(ingestion_service, "_get_gdelt_client", return_value=mock_gdelt_client),
+        patch.object(ingestion_service, "get_settings") as mock_settings,
+    ):
+        mock_settings.return_value.retention_days = 30
+        mock_settings.return_value.ingestion_batch_size = 10000
+
+        result = await ingestion_service.run_incremental(db_session)
 
     assert result["status"] == "completed"
-    # With no new rows, incremental advances the watermark to the checked window end.
-    assert result["watermark"] >= 20260301000000
+    mock_gdelt_client.download_events.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_incremental_with_existing_bootstrap_watermark(mock_gdelt_client, db_session):
+    """Incremental uses bootstrap watermark and downloads a newer file."""
+    from app.services import ingestion_service
+
+    bootstrap_run = await ingestion_repository.create_ingestion_run(
+        db_session,
+        ingestion_repository.IngestionType.BOOTSTRAP,
+    )
+    await ingestion_repository.update_ingestion_run(
+        db_session,
+        bootstrap_run.id,
+        ingestion_repository.IngestionStatus.COMPLETED,
+        watermark_dateadded=20260301000000,
+        events_ingested=0,
+    )
+    await db_session.commit()
+
+    # Latest file is newer than the bootstrap watermark
+    mock_gdelt_client.fetch_latest_export_url = AsyncMock(
+        return_value=("https://fake/20260308120000.export.CSV.zip", 20260308120000)
+    )
+    mock_gdelt_client.download_events = AsyncMock(return_value=[_make_gdelt_row()])
+
+    with (
+        patch.object(ingestion_service, "_get_gdelt_client", return_value=mock_gdelt_client),
+        patch.object(ingestion_service, "get_settings") as mock_settings,
+    ):
+        mock_settings.return_value.retention_days = 30
+        mock_settings.return_value.ingestion_batch_size = 10000
+
+        result = await ingestion_service.run_incremental(db_session)
+
+    assert result["status"] == "completed"
+    mock_gdelt_client.download_events.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 async def test_run_retention_cleanup(db_session):
-    """Test retention cleanup deletes old events."""
+    """Retention cleanup deletes events older than retention_days."""
     from app.db.repositories import event_repository
     from app.services import ingestion_service
 
-    # Insert events with old dates
     old_events = [
         {
             "global_event_id": 1234567890123,
-            "sql_date": 20250101,  # Old date
+            "sql_date": 20250101,
             "date_added": 20250101000000,
             "actor1_country_code": "USA",
             "source_url": "https://example.com/old",
         },
         {
             "global_event_id": 1234567890124,
-            "sql_date": 20260301,  # Recent date
+            "sql_date": 20260301,
             "date_added": 20260301000000,
             "actor1_country_code": "USA",
             "source_url": "https://example.com/recent",
@@ -374,16 +246,13 @@ async def test_run_retention_cleanup(db_session):
     await event_repository.bulk_insert_events(db_session, old_events)
     await db_session.commit()
 
-    # Run retention with 30 days
     with patch.object(ingestion_service, "get_settings") as mock_settings:
         mock_settings.return_value.retention_days = 30
 
         result = await ingestion_service.run_retention_cleanup(db_session)
 
-    # Should have deleted the old event
     assert result["deleted"] == 1
 
-    # Recent event should remain
     count = await event_repository.get_event_count(db_session)
     assert count == 1
 
