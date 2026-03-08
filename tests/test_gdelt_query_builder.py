@@ -212,6 +212,7 @@ def test_build_ingestion_incremental_query_includes_sqldate_bounds():
     """Incremental ingestion should also bound scans by SQLDATE."""
     sql, params = build_ingestion_incremental_query(
         since_dateadded=20260308010000,
+        window_end_dateadded=20260308120000,
         date_from_sqldate=20260308,
         date_to_sqldate=20260308,
     )
@@ -227,6 +228,20 @@ def test_build_ingestion_incremental_query_includes_sqldate_bounds():
         "date_to_sqldate",
         "limit",
     ]
+
+
+def test_build_ingestion_incremental_query_uses_explicit_window_end():
+    """Incremental ingestion should use the caller-provided end boundary."""
+    _, params = build_ingestion_incremental_query(
+        since_dateadded=20260308043000,
+        window_end_dateadded=20260308101500,
+        date_from_sqldate=20260308,
+        date_to_sqldate=20260308,
+    )
+
+    values = {param.name: param.value for param in params}
+    assert values["window_start_dateadded"] == 20260308043000
+    assert values["window_end_dateadded"] == 20260308101500
 
 
 def test_build_ingestion_bootstrap_query_uses_bounded_dateadded_window():

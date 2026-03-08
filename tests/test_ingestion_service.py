@@ -214,6 +214,24 @@ def test_iter_bootstrap_windows_covers_retention_period_without_overlap():
     assert windows[2] == (20260208000000, 20260208063000, 20260208, 20260208)
 
 
+def test_iter_incremental_windows_preserves_partial_first_day():
+    """Incremental windows should start at the watermark, not midnight."""
+    from datetime import datetime, timezone
+
+    from app.services.ingestion_service import _iter_incremental_windows
+
+    start = datetime(2026, 3, 8, 4, 30, tzinfo=timezone.utc)
+    end = datetime(2026, 3, 10, 6, 0, tzinfo=timezone.utc)
+
+    windows = list(_iter_incremental_windows(start, end))
+
+    assert windows == [
+        (20260308043000, 20260309000000, 20260308, 20260308),
+        (20260309000000, 20260310000000, 20260309, 20260309),
+        (20260310000000, 20260310060000, 20260310, 20260310),
+    ]
+
+
 @pytest.mark.asyncio
 async def test_run_bootstrap_uses_window_bounds_not_open_ended_watermark_paging(
     mock_bq_client,
@@ -256,6 +274,45 @@ async def test_run_bootstrap_uses_window_bounds_not_open_ended_watermark_paging(
 
 
 @pytest.mark.asyncio
+async def test_run_incremental_uses_bounded_windows_from_watermark(mock_bq_client, db_session):
+    """Incremental ingestion should step through bounded windows, not one huge range."""
+    from datetime import datetime, timezone
+
+    from app.services import ingestion_service
+
+    with (
+        patch.object(ingestion_service, "get_settings") as mock_settings,
+        patch.object(
+            ingestion_service,
+            "_iter_incremental_windows",
+            return_value=[
+                (20260308043000, 20260309000000, 20260308, 20260308),
+                (20260309000000, 20260309120000, 20260309, 20260309),
+            ],
+        ),
+        patch.object(
+            ingestion_service,
+            "build_ingestion_incremental_query",
+            return_value=("SELECT 1", []),
+        ) as build_query,
+        patch.object(ingestion_service, "datetime") as mock_datetime,
+    ):
+        mock_settings.return_value.ingestion_batch_size = 10000
+        mock_datetime.now.return_value = datetime(2026, 3, 9, 12, 0, tzinfo=timezone.utc)
+        mock_datetime.strptime = datetime.strptime
+
+        await ingestion_service.run_incremental(mock_bq_client, db_session)
+
+    assert build_query.call_count == 2
+    first_call = build_query.call_args_list[0].kwargs
+    second_call = build_query.call_args_list[1].kwargs
+    assert first_call["since_dateadded"] == 20260308043000
+    assert first_call["window_end_dateadded"] == 20260309000000
+    assert second_call["since_dateadded"] == 20260309000000
+    assert second_call["window_end_dateadded"] == 20260309120000
+
+
+@pytest.mark.asyncio
 async def test_run_incremental_with_watermark(mock_bq_client, db_session):
     """Test incremental ingestion uses existing watermark."""
     from app.services import ingestion_service
@@ -286,8 +343,8 @@ async def test_run_incremental_with_watermark(mock_bq_client, db_session):
         )
 
     assert result["status"] == "completed"
-    # Should have used the bootstrap watermark
-    assert result["watermark"] == 20260301000000
+    # With no new rows, incremental advances the watermark to the checked window end.
+    assert result["watermark"] >= 20260301000000
 
 
 @pytest.mark.asyncio

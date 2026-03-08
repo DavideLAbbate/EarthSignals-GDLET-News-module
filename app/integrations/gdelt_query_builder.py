@@ -233,7 +233,7 @@ def build_ingestion_bootstrap_query(
     date_from_sqldate: int,
     date_to_sqldate: int,
     limit: int = 10_000,
-) -> tuple[str, list[bigquery.ScalarQueryParameter]]:
+) -> tuple[str, list[bigquery.ScalarQueryParameter | bigquery.ArrayQueryParameter]]:
     """
     Build query for bootstrap ingestion - fetch events since a DATEADDED timestamp.
     Used for initial load of the rolling window.
@@ -256,7 +256,7 @@ ORDER BY DATEADDED ASC, GLOBALEVENTID ASC
 LIMIT @limit
 """
     window_end_dateadded = _next_dateadded_window_boundary(since_dateadded)
-    params = [
+    params: list[bigquery.ScalarQueryParameter | bigquery.ArrayQueryParameter] = [
         bigquery.ScalarQueryParameter("window_start_dateadded", "INT64", since_dateadded),
         bigquery.ScalarQueryParameter("window_end_dateadded", "INT64", window_end_dateadded),
         bigquery.ScalarQueryParameter("date_from_sqldate", "INT64", date_from_sqldate),
@@ -268,20 +268,40 @@ LIMIT @limit
 
 def build_ingestion_incremental_query(
     since_dateadded: int,
+    window_end_dateadded: int,
     date_from_sqldate: int,
     date_to_sqldate: int,
     limit: int = 10_000,
-) -> tuple[str, list[bigquery.ScalarQueryParameter]]:
+) -> tuple[str, list[bigquery.ScalarQueryParameter | bigquery.ArrayQueryParameter]]:
     """
     Build query for incremental ingestion - fetch events newer than watermark.
     Identical to bootstrap but semantically different use case.
     """
-    return build_ingestion_bootstrap_query(
-        since_dateadded=since_dateadded,
-        date_from_sqldate=date_from_sqldate,
-        date_to_sqldate=date_to_sqldate,
-        limit=limit,
-    )
+    query = f"""
+SELECT
+    GLOBALEVENTID, SQLDATE, DATEADDED,
+    Actor1CountryCode, Actor2CountryCode,
+    EventCode, EventBaseCode, EventRootCode,
+    QuadClass, GoldsteinScale, AvgTone,
+    NumMentions, NumSources, NumArticles,
+    ActionGeo_FullName, ActionGeo_CountryCode,
+    SOURCEURL
+    FROM {GDELT_TABLE}
+WHERE DATEADDED >= @window_start_dateadded
+  AND DATEADDED < @window_end_dateadded
+  AND SQLDATE >= @date_from_sqldate
+  AND SQLDATE <= @date_to_sqldate
+ORDER BY DATEADDED ASC, GLOBALEVENTID ASC
+LIMIT @limit
+"""
+    params: list[bigquery.ScalarQueryParameter | bigquery.ArrayQueryParameter] = [
+        bigquery.ScalarQueryParameter("window_start_dateadded", "INT64", since_dateadded),
+        bigquery.ScalarQueryParameter("window_end_dateadded", "INT64", window_end_dateadded),
+        bigquery.ScalarQueryParameter("date_from_sqldate", "INT64", date_from_sqldate),
+        bigquery.ScalarQueryParameter("date_to_sqldate", "INT64", date_to_sqldate),
+        bigquery.ScalarQueryParameter("limit", "INT64", limit),
+    ]
+    return query, params
 
 
 # ── Private helpers ───────────────────────────────────────────────────────

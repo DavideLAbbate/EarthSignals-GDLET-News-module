@@ -49,6 +49,30 @@ def _iter_bootstrap_windows(
     return windows
 
 
+def _iter_incremental_windows(
+    start: datetime,
+    end: datetime,
+) -> list[tuple[int, int, int, int]]:
+    """Split incremental ingestion into non-overlapping windows from the watermark onward."""
+    windows: list[tuple[int, int, int, int]] = []
+    cursor = start.replace(microsecond=0)
+
+    while cursor < end:
+        next_day = (cursor + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        next_cursor = min(next_day, end)
+        windows.append(
+            (
+                int(cursor.strftime("%Y%m%d%H%M%S")),
+                int(next_cursor.strftime("%Y%m%d%H%M%S")),
+                int(cursor.strftime("%Y%m%d")),
+                int(cursor.strftime("%Y%m%d")),
+            )
+        )
+        cursor = next_cursor
+
+    return windows
+
+
 async def run_bootstrap(
     bq_client: BigQueryClientWrapper,
     session: AsyncSession,
@@ -178,7 +202,7 @@ async def run_incremental(
             one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
             since_dateadded = int(one_hour_ago.strftime("%Y%m%d%H%M%S"))
 
-    date_to_sqldate = int(datetime.now(timezone.utc).strftime("%Y%m%d"))
+    now = datetime.now(timezone.utc)
 
     # Create ingestion run record
     run = await ingestion_repository.create_ingestion_run(
@@ -192,10 +216,23 @@ async def run_incremental(
     batch_size = settings.ingestion_batch_size
 
     try:
-        while True:
+        start_dt = datetime.strptime(str(since_dateadded), "%Y%m%d%H%M%S").replace(
+            tzinfo=timezone.utc
+        )
+
+        for (
+            window_start,
+            window_end,
+            date_from_sqldate,
+            date_to_sqldate,
+        ) in _iter_incremental_windows(
+            start_dt,
+            now,
+        ):
             query, params = build_ingestion_incremental_query(
-                since_dateadded=last_watermark,
-                date_from_sqldate=_dateadded_to_sqldate(last_watermark),
+                since_dateadded=window_start,
+                window_end_dateadded=window_end,
+                date_from_sqldate=date_from_sqldate,
                 date_to_sqldate=date_to_sqldate,
                 limit=batch_size,
             )
@@ -203,7 +240,8 @@ async def run_incremental(
             rows: list[dict[str, Any]] = await bq_client.run_query(query, params)
 
             if not rows:
-                break
+                last_watermark = window_end
+                continue
 
             events = [_row_to_event_dict(row) for row in rows]
 
@@ -214,7 +252,7 @@ async def run_incremental(
             await session.commit()
 
             total_ingested += inserted
-            last_watermark = events[-1]["date_added"]
+            last_watermark = max(window_end, events[-1]["date_added"])
 
             logger.info(
                 "incremental_batch_ingested",
@@ -223,9 +261,6 @@ async def run_incremental(
                 total=total_ingested,
                 watermark=last_watermark,
             )
-
-            if len(rows) < batch_size:
-                break
 
         await ingestion_repository.update_ingestion_run(
             session,
