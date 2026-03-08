@@ -1,31 +1,38 @@
 # GDELT News Backend
 
-A production-grade REST API that queries the [GDELT 2.0](https://www.gdeltproject.org/) global event dataset via Google BigQuery, uses Claude (Anthropic) to interpret natural-language news filters, and caches results in PostgreSQL. Designed to be consumed by a frontend news journal application.
+A production-grade REST API that ingests the [GDELT 2.0](https://www.gdeltproject.org/) public dataset from Google BigQuery into PostgreSQL, uses Claude (Anthropic) to interpret natural-language filters, and serves runtime search results from the local event store. Designed to be consumed by a frontend news journal application.
 
 ---
 
 ## How it works
 
 ```
+Startup / scheduler
+      │
+      ├─► BigQuery ──► bootstrap + incremental ingestion into PostgreSQL
+      │
+      └─► BigQuery ──► metadata sync (top countries, top event codes)
+
 Frontend request
       │
       ▼
 POST /events/search  {"country": "Italy", "event_type": "protest"}
       │
       ▼
-Claude (Anthropic) ──► normalizes to CAMEO/FIPS codes + date range
+Claude (Anthropic) ──► normalizes free-text filters when needed
       │
       ▼
-Google BigQuery ──► queries gdelt-bq.gdeltv2.events (public dataset)
-      │
-      ▼
-PostgreSQL ──► caches normalized filters (avoids redundant Claude calls)
+PostgreSQL ──► queries local `gdelt_events` store
       │
       ▼
 Structured JSON response with events, scores, sources
 ```
 
-A background scheduler syncs GDELT metadata (top countries, event types) every 15 minutes.
+Important runtime behavior:
+- `POST /events/search` reads from local PostgreSQL, not live BigQuery.
+- Free-text fields such as `country`, `event_type`, and `macro_topic` may call Anthropic.
+- On startup, the app runs a one-time bootstrap ingestion only if `gdelt_events` is empty.
+- A background scheduler syncs GDELT metadata every 15 minutes and runs incremental ingestion every 60 minutes.
 
 ---
 
@@ -71,7 +78,7 @@ Edit `.env` and fill in your real values:
 GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/gcp-key.json   # path inside container, do not change
 GCP_PROJECT_ID=your-gcp-project-id
 ANTHROPIC_API_KEY=sk-ant-...
-DATABASE_URL=postgresql+asyncpg://gdelt_user:changeme@db:5432/gdelt_db
+DATABASE_URL=postgresql+asyncpg://postgres:your-postgres-password@db:5432/railway
 API_KEY=your-secret-api-key                                 # used by the frontend as X-API-Key
 CORS_ORIGINS=["http://localhost:3000"]
 ```
@@ -99,6 +106,12 @@ This will:
 2. Run Alembic migrations (`alembic upgrade head`)
 3. Start the FastAPI app on port `8000`
 4. Run an initial GDELT metadata sync immediately
+5. Run a startup bootstrap ingestion only when the local `gdelt_events` table is empty
+
+Notes:
+- If the database already contains events, startup logs `startup_bootstrap_skipped` and does not re-fetch the retention window.
+- If you interrupt `docker compose up` with `Ctrl+C`, PostgreSQL data is still preserved in the Docker volume unless you explicitly remove volumes.
+- BigQuery billing applies to metadata sync and ingestion jobs, not to normal local PostgreSQL search requests.
 
 ---
 
@@ -118,7 +131,12 @@ Health check. No auth required.
 ---
 
 ### `POST /events/search`
-Main search endpoint. Free-text filters are normalized through Claude, structured filters are applied directly, then the backend queries BigQuery.
+Main search endpoint. Free-text filters are normalized through Claude when needed, structured filters are applied directly, then the backend queries the local PostgreSQL event store.
+
+Cost behavior:
+- No live BigQuery query is executed for `POST /events/search`.
+- Anthropic may still be called when you use free-text fields such as `country`, `event_type`, or `macro_topic`.
+- To stay fully local, use only structured filters.
 
 **Request body** — at least one field required:
 ```json
@@ -209,8 +227,8 @@ Main search endpoint. Free-text filters are normalized through Claude, structure
     "total_results": 1,
     "query_time_ms": 1243,
     "last_gdelt_sync": "2026-03-07T01:03:37Z",
-    "mapping_version": "2026-03-07T01:03:34Z",
-    "bq_bytes_processed": 10468810084
+    "mapping_version": null,
+    "bq_bytes_processed": null
   }
 }
 ```
@@ -230,7 +248,7 @@ Main search endpoint. Free-text filters are normalized through Claude, structure
 The backend supports two filter families:
 
 - **Free-text filters** — interpreted by Claude and translated into GDELT-compatible codes
-- **Structured filters** — validated and applied directly to BigQuery without LLM interpretation
+- **Structured filters** — validated and applied directly to PostgreSQL without LLM interpretation
 
 ##### Free-text filters (Claude-powered)
 
@@ -247,11 +265,11 @@ Notes:
 - `event_type` and `macro_topic` are merged with any direct `event_codes` supplied by the UI
 - these fields are cached in PostgreSQL, so repeated searches do not keep calling Claude
 
-##### Structured filters (direct BigQuery filters)
+##### Structured filters (direct PostgreSQL filters)
 
 These are deterministic and do not require Claude.
 
-| Field | Type | Example | BigQuery effect |
+| Field | Type | Example | Query effect |
 |---|---|---|---|
 | `countries` | `string[]` | `["France", "Germany"]` | Filters `ActionGeo_CountryCode` using normalized FIPS codes |
 | `date_range` | `{from,to}` | `{ "from": 2022, "to": 2024 }` | Filters `SQLDATE` between `YYYY0101` and `YYYY1231` |
@@ -291,7 +309,7 @@ Example:
 Behavior:
 - Claude interprets `country` and `event_type`
 - the backend merges those interpreted codes with the explicit structured filters
-- all resulting filters are applied in a single BigQuery query
+- all resulting filters are applied in a single PostgreSQL query against `gdelt_events`
 
 ##### Validation rules
 
@@ -300,7 +318,27 @@ Behavior:
 - `sentiment.tone_min` must be `<= sentiment.tone_max`
 - `sentiment.goldstein_min` must be `<= sentiment.goldstein_max`
 - `quad_classes` should use GDELT values `1`, `2`, `3`, `4`
-- `MAX_BQ_SCAN_DAYS` still applies: very wide date windows are rejected as a cost guard
+- `MAX_BQ_SCAN_DAYS` applies to upstream BigQuery-backed safeguards, not to local PostgreSQL result paging
+
+##### Example local-only request
+
+This request avoids both BigQuery and Anthropic during search execution:
+
+```json
+{
+  "countries": ["US"],
+  "date_range": {
+    "from": 2026,
+    "to": 2026
+  },
+  "event_codes": {
+    "root_codes": ["01"],
+    "base_codes": [],
+    "full_codes": []
+  },
+  "quad_classes": [1]
+}
+```
 
 ##### Suggested UI mapping
 
@@ -318,7 +356,7 @@ For a globe-based frontend, a practical UI setup is:
 ---
 
 ### `POST /filters/interpret`
-Dry-run: normalizes filters and returns the final GDELT query parameters **without** querying BigQuery. Useful for frontend filter preview.
+Dry-run: normalizes filters and returns the final normalized query parameters **without** querying BigQuery for events. Useful for frontend filter preview.
 
 Same request body as `/events/search`. Response is just `filters_normalized`:
 ```json
@@ -397,6 +435,9 @@ http://localhost:8000/docs
 ```
 Click **Authorize** in the top right and enter your `API_KEY` to test all endpoints interactively.
 
+Swagger tip:
+- `POST /events/search` currently accepts a generic JSON object in OpenAPI, so Swagger does not render a detailed request schema. Use the examples in this README as the request body shape.
+
 ---
 
 ## Development (without Docker)
@@ -454,7 +495,7 @@ app/
 │   ├── exceptions.py         # Typed domain exceptions
 │   └── logging.py            # structlog setup
 ├── db/
-│   ├── models.py             # SyncState, FilterMappingCache ORM models
+│   ├── models.py             # SyncState, FilterMappingCache, GdeltEvent, IngestionState
 │   ├── session.py            # Async engine + session factory
 │   └── repositories/         # Raw DB access (services call these)
 ├── integrations/
@@ -462,7 +503,7 @@ app/
 │   ├── bigquery_client.py    # Sync BQ SDK wrapped in ThreadPoolExecutor
 │   ├── country_codes.py      # CAMEO + FIPS lookup tables
 │   ├── filter_interpreter.py # Claude prompt + retry logic
-│   ├── gdelt_query_builder.py# Parameterized BigQuery SQL builders
+│   ├── gdelt_query_builder.py# Parameterized BigQuery SQL builders for sync/ingestion
 │   └── gdelt_result_mapper.py# BQ row dict → GDELTEvent Pydantic models
 ├── scheduler/
 │   ├── scheduler.py          # APScheduler setup
@@ -473,7 +514,8 @@ app/
 │   └── sync.py               # SyncStatusResponse, FiltersMetadataResponse
 └── services/
     ├── filter_service.py     # normalize_filters() — cache + Claude orchestration
-    └── query_service.py      # search_events() — BQ query + response assembly
+    ├── ingestion_service.py  # bootstrap/incremental ingestion into local Postgres
+    └── query_service.py      # search_events() — local Postgres query + response assembly
 alembic/versions/             # Database migrations
 tests/                        # pytest test suite
 ```
@@ -495,6 +537,9 @@ tests/                        # pytest test suite
 | `BQ_MAX_RESULTS` | No | `500` | Max rows returned per search query |
 | `MAX_BQ_SCAN_DAYS` | No | `3650` | Max date window (cost guard — queries exceeding this are rejected) |
 | `SYNC_INTERVAL_MINUTES` | No | `15` | Background sync frequency |
+| `INGESTION_INTERVAL_MINUTES` | No | `60` | Background incremental ingestion frequency |
+| `RETENTION_DAYS` | No | `30` | Local event retention window and startup bootstrap window |
+| `INGESTION_BATCH_SIZE` | No | `10000` | Upstream ingestion fetch batch size |
 | `RATE_LIMIT_PER_MINUTE` | No | `10` | Max requests/minute per IP on `/events/search` |
 | `APP_ENV` | No | `production` | Set to `development` for colored console logs |
 | `LOG_LEVEL` | No | `INFO` | Logging level |
