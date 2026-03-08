@@ -60,7 +60,7 @@ class AnthropicUnavailableError(GDELTBackendError):
 
 
 class IngestionError(GDELTBackendError):
-    """Raised when event ingestion from BigQuery fails."""
+    """Raised when event ingestion fails (HTTP download, parse, or DB write error)."""
 
     def __init__(self, message: str) -> None:
         super().__init__(message)
