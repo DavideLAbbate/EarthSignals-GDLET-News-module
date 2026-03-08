@@ -21,6 +21,11 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+def _dateadded_to_sqldate(dateadded: int) -> int:
+    """Convert a DATEADDED timestamp (YYYYMMDDHHMMSS) to SQLDATE (YYYYMMDD)."""
+    return int(str(dateadded)[:8])
+
+
 async def run_bootstrap(
     bq_client: BigQueryClientWrapper,
     session: AsyncSession,
@@ -43,6 +48,7 @@ async def run_bootstrap(
     start_date = datetime.now(timezone.utc) - timedelta(days=settings.retention_days)
     # DATEADDED format: YYYYMMDDHHMMSS - start with midnight
     start_dateadded = int(start_date.strftime("%Y%m%d000000"))
+    date_to_sqldate = int(datetime.now(timezone.utc).strftime("%Y%m%d"))
 
     total_ingested = 0
     last_watermark = start_dateadded
@@ -52,6 +58,8 @@ async def run_bootstrap(
         while True:
             query, params = build_ingestion_bootstrap_query(
                 since_dateadded=last_watermark,
+                date_from_sqldate=_dateadded_to_sqldate(last_watermark),
+                date_to_sqldate=date_to_sqldate,
                 limit=batch_size,
             )
 
@@ -150,6 +158,8 @@ async def run_incremental(
             one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
             since_dateadded = int(one_hour_ago.strftime("%Y%m%d%H%M%S"))
 
+    date_to_sqldate = int(datetime.now(timezone.utc).strftime("%Y%m%d"))
+
     # Create ingestion run record
     run = await ingestion_repository.create_ingestion_run(
         session,
@@ -165,6 +175,8 @@ async def run_incremental(
         while True:
             query, params = build_ingestion_incremental_query(
                 since_dateadded=last_watermark,
+                date_from_sqldate=_dateadded_to_sqldate(last_watermark),
+                date_to_sqldate=date_to_sqldate,
                 limit=batch_size,
             )
 

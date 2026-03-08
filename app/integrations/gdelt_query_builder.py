@@ -228,6 +228,8 @@ LIMIT 20
 
 def build_ingestion_bootstrap_query(
     since_dateadded: int,
+    date_from_sqldate: int,
+    date_to_sqldate: int,
     limit: int = 10_000,
 ) -> tuple[str, list[bigquery.ScalarQueryParameter]]:
     """
@@ -245,11 +247,15 @@ SELECT
     SOURCEURL
     FROM {GDELT_TABLE}
 WHERE DATEADDED >= @since_dateadded
+  AND SQLDATE >= @date_from_sqldate
+  AND SQLDATE <= @date_to_sqldate
 ORDER BY DATEADDED ASC
 LIMIT @limit
 """
     params = [
         bigquery.ScalarQueryParameter("since_dateadded", "INT64", since_dateadded),
+        bigquery.ScalarQueryParameter("date_from_sqldate", "INT64", date_from_sqldate),
+        bigquery.ScalarQueryParameter("date_to_sqldate", "INT64", date_to_sqldate),
         bigquery.ScalarQueryParameter("limit", "INT64", limit),
     ]
     return query, params
@@ -257,13 +263,20 @@ LIMIT @limit
 
 def build_ingestion_incremental_query(
     since_dateadded: int,
+    date_from_sqldate: int,
+    date_to_sqldate: int,
     limit: int = 10_000,
 ) -> tuple[str, list[bigquery.ScalarQueryParameter]]:
     """
     Build query for incremental ingestion - fetch events newer than watermark.
     Identical to bootstrap but semantically different use case.
     """
-    return build_ingestion_bootstrap_query(since_dateadded, limit)
+    return build_ingestion_bootstrap_query(
+        since_dateadded=since_dateadded,
+        date_from_sqldate=date_from_sqldate,
+        date_to_sqldate=date_to_sqldate,
+        limit=limit,
+    )
 
 
 # ── Private helpers ───────────────────────────────────────────────────────

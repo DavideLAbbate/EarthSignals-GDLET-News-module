@@ -18,7 +18,11 @@ os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///./test.db")
 os.environ.setdefault("API_KEY", "test-api-key")
 
 from app.core.exceptions import QueryValidationError
-from app.integrations.gdelt_query_builder import build_events_query, build_ingestion_bootstrap_query
+from app.integrations.gdelt_query_builder import (
+    build_events_query,
+    build_ingestion_bootstrap_query,
+    build_ingestion_incremental_query,
+)
 
 
 def test_build_events_query_basic():
@@ -166,8 +170,55 @@ def test_build_events_query_never_select_star():
 
 def test_build_ingestion_bootstrap_query_uses_valid_table_identifier():
     """Bootstrap ingestion should reference the GDELT table with one pair of backticks."""
-    sql, params = build_ingestion_bootstrap_query(since_dateadded=20260301000000)
+    sql, params = build_ingestion_bootstrap_query(
+        since_dateadded=20260301000000,
+        date_from_sqldate=20260207,
+        date_to_sqldate=20260308,
+    )
 
     assert "FROM `gdelt-bq.gdeltv2.events`" in sql
     assert "FROM ``gdelt-bq.gdeltv2.events``" not in sql
-    assert [param.name for param in params] == ["since_dateadded", "limit"]
+    assert [param.name for param in params] == [
+        "since_dateadded",
+        "date_from_sqldate",
+        "date_to_sqldate",
+        "limit",
+    ]
+
+
+def test_build_ingestion_bootstrap_query_includes_sqldate_bounds():
+    """Bootstrap ingestion should bound scans by SQLDATE as well as DATEADDED."""
+    sql, params = build_ingestion_bootstrap_query(
+        since_dateadded=20260301000000,
+        date_from_sqldate=20260207,
+        date_to_sqldate=20260308,
+    )
+
+    assert "SQLDATE >= @date_from_sqldate" in sql
+    assert "SQLDATE <= @date_to_sqldate" in sql
+    assert "DATEADDED >= @since_dateadded" in sql
+    assert [param.name for param in params] == [
+        "since_dateadded",
+        "date_from_sqldate",
+        "date_to_sqldate",
+        "limit",
+    ]
+
+
+def test_build_ingestion_incremental_query_includes_sqldate_bounds():
+    """Incremental ingestion should also bound scans by SQLDATE."""
+    sql, params = build_ingestion_incremental_query(
+        since_dateadded=20260308010000,
+        date_from_sqldate=20260308,
+        date_to_sqldate=20260308,
+    )
+
+    assert "SQLDATE >= @date_from_sqldate" in sql
+    assert "SQLDATE <= @date_to_sqldate" in sql
+    assert "DATEADDED >= @since_dateadded" in sql
+    assert [param.name for param in params] == [
+        "since_dateadded",
+        "date_from_sqldate",
+        "date_to_sqldate",
+        "limit",
+    ]

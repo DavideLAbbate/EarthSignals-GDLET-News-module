@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, patch
+
 import pytest
 
 from app.db.repositories import event_repository
@@ -134,3 +136,43 @@ async def test_get_event_count(db_session, sample_events):
 
     count = await event_repository.get_event_count(db_session)
     assert count == 2
+
+
+@pytest.mark.asyncio
+async def test_bulk_insert_events_chunks_large_batches(db_session):
+    """Large batches should be split into multiple insert statements."""
+    large_batch = [
+        {
+            "global_event_id": 1234567800000 + index,
+            "sql_date": 20260301,
+            "date_added": 20260301000000 + index,
+            "actor1_country_code": "USA",
+            "actor2_country_code": "CHN",
+            "event_code": "042",
+            "event_base_code": "04",
+            "event_root_code": "04",
+            "quad_class": 2,
+            "goldstein_scale": 5.0,
+            "avg_tone": -2.5,
+            "num_mentions": 10,
+            "num_sources": 5,
+            "num_articles": 3,
+            "action_geo_full_name": f"Location {index}",
+            "action_geo_country_code": "US",
+            "source_url": f"https://example.com/article-{index}",
+        }
+        for index in range(2000)
+    ]
+
+    with patch.object(
+        db_session, "execute", new=AsyncMock(wraps=db_session.execute)
+    ) as execute_spy:
+        inserted = await event_repository.bulk_insert_events(db_session, large_batch)
+
+    await db_session.commit()
+
+    assert inserted == 2000
+    assert execute_spy.await_count > 1
+
+    count = await event_repository.get_event_count(db_session)
+    assert count == 2000

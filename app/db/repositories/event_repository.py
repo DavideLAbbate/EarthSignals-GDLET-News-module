@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import delete, func, select
@@ -12,6 +13,12 @@ from app.db.models import GdeltEvent
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+
+MAX_QUERY_ARGS_BY_DIALECT = {
+    "postgresql": 32_767,
+    "sqlite": 999,
+}
 
 
 async def bulk_insert_events(
@@ -25,12 +32,19 @@ async def bulk_insert_events(
     if not events:
         return 0
 
-    stmt = insert(GdeltEvent).values(events)
-    stmt = stmt.on_conflict_do_nothing(
-        index_elements=["global_event_id"],
-    )
-    result = await session.execute(stmt)
-    return result.rowcount
+    chunk_size = _get_insert_chunk_size(session)
+    inserted_total = 0
+
+    for start in range(0, len(events), chunk_size):
+        chunk = events[start : start + chunk_size]
+        stmt = insert(GdeltEvent).values(chunk)
+        stmt = stmt.on_conflict_do_nothing(
+            index_elements=["global_event_id"],
+        )
+        result = await session.execute(stmt)
+        inserted_total += result.rowcount or 0
+
+    return inserted_total
 
 
 async def get_latest_watermark(session: AsyncSession) -> int | None:
@@ -76,3 +90,11 @@ async def get_events_paginated(
     stmt = select(GdeltEvent).order_by(GdeltEvent.date_added.desc()).offset(offset).limit(limit)
     result = await session.execute(stmt)
     return result.scalars().all()
+
+
+def _get_insert_chunk_size(session: AsyncSession) -> int:
+    """Return a safe multi-row insert size for the active database dialect."""
+    dialect_name = session.bind.dialect.name if session.bind is not None else "postgresql"
+    max_query_args = MAX_QUERY_ARGS_BY_DIALECT.get(dialect_name, 32_767)
+    column_count = len(GdeltEvent.__table__.columns)
+    return max(1, math.floor(max_query_args / column_count))

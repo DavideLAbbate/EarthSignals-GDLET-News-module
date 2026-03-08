@@ -132,6 +132,65 @@ async def test_run_bootstrap_awaits_async_bigquery_client(db_session):
 
 
 @pytest.mark.asyncio
+async def test_run_bootstrap_limits_query_to_retention_window(mock_bq_client, db_session):
+    """Bootstrap should pass SQLDATE bounds to keep BigQuery scans bounded."""
+    from app.services import ingestion_service
+
+    with (
+        patch.object(ingestion_service, "get_settings") as mock_settings,
+        patch.object(
+            ingestion_service,
+            "build_ingestion_bootstrap_query",
+            return_value=("SELECT 1", []),
+        ) as build_query,
+    ):
+        mock_settings.return_value.retention_days = 30
+        mock_settings.return_value.ingestion_batch_size = 10000
+
+        await ingestion_service.run_bootstrap(
+            mock_bq_client,
+            db_session,
+        )
+
+    assert build_query.call_args.kwargs["date_from_sqldate"] == int(
+        str(build_query.call_args.kwargs["since_dateadded"])[:8]
+    )
+    assert (
+        build_query.call_args.kwargs["date_from_sqldate"]
+        <= build_query.call_args.kwargs["date_to_sqldate"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_incremental_limits_query_to_recent_sqldate_range(mock_bq_client, db_session):
+    """Incremental ingestion should also include SQLDATE bounds."""
+    from app.services import ingestion_service
+
+    with (
+        patch.object(ingestion_service, "get_settings") as mock_settings,
+        patch.object(
+            ingestion_service,
+            "build_ingestion_incremental_query",
+            return_value=("SELECT 1", []),
+        ) as build_query,
+    ):
+        mock_settings.return_value.ingestion_batch_size = 10000
+
+        await ingestion_service.run_incremental(
+            mock_bq_client,
+            db_session,
+        )
+
+    assert build_query.call_args.kwargs["date_from_sqldate"] == int(
+        str(build_query.call_args.kwargs["since_dateadded"])[:8]
+    )
+    assert (
+        build_query.call_args.kwargs["date_from_sqldate"]
+        <= build_query.call_args.kwargs["date_to_sqldate"]
+    )
+
+
+@pytest.mark.asyncio
 async def test_run_incremental_with_watermark(mock_bq_client, db_session):
     """Test incremental ingestion uses existing watermark."""
     from app.services import ingestion_service
