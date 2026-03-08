@@ -24,8 +24,11 @@ FROM python:3.11-slim AS runtime
 
 WORKDIR /app
 
-# Install curl for healthcheck
-RUN apt-get update && apt-get install -y --no-install-recommends curl \
+# Install curl for healthcheck + ca-certificates for outbound HTTPS (GDELT HTTP client)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the entire venv from builder (packages + scripts like alembic, uvicorn)
