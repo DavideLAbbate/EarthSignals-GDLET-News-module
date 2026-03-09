@@ -1,7 +1,7 @@
 """
-Tests for the 15-minute GDELT sync job.
+Tests for the GDELT metadata refresh job.
 
-Verifies that sync writes correct SyncState to DB and is idempotent.
+Verifies that the job writes SyncState from local events and remains append-only.
 """
 
 from __future__ import annotations

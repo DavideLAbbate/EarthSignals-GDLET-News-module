@@ -1,7 +1,7 @@
 """
 SQLAlchemy ORM models.
 
-SyncState     — persists the result of each 15-minute GDELT metadata sync.
+SyncState         — persists metadata snapshots derived from the local GDELT event store.
 FilterMappingCache — caches Claude's filter normalization output by input hash.
 """
 

@@ -1,13 +1,13 @@
 """
-15-minute GDELT metadata sync job.
+GDELT metadata refresh job.
 
-Queries local PostgreSQL event storage for:
+Computes metadata from local PostgreSQL event storage:
   1. The latest SQLDATE and DATEADDED (freshness indicator)
   2. Top-20 countries by event count (last 30 days)
   3. Top-20 event root codes by event count (last 30 days)
 
-Writes results to PostgreSQL SyncState atomically.
-This runs as an APScheduler job every SYNC_INTERVAL_MINUTES.
+Writes the resulting snapshot to PostgreSQL SyncState.
+The schedule is controlled by SYNC_INTERVAL_MINUTES.
 """
 
 from __future__ import annotations
@@ -41,9 +41,11 @@ def _sqldate_30_days_ago() -> int:
 
 async def run_gdelt_sync(bq_client: BigQueryClientWrapper | None = None) -> None:
     """
-    Execute the full GDELT metadata sync.
+    Execute the full GDELT metadata refresh.
 
     Metadata is derived from the local event store and written atomically.
+    The optional BigQuery client argument is retained for compatibility with
+    existing scheduler and dependency wiring.
     """
     mapping_version = datetime.now(timezone.utc).isoformat()
     logger.info("gdelt_sync_start", mapping_version=mapping_version)

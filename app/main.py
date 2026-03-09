@@ -4,17 +4,16 @@ FastAPI application factory and lifespan manager.
 Startup sequence (in lifespan):
   1. Configure structlog
   2. Validate settings (fail fast if required vars are missing)
-  3. Create BigQuery client + executor thread pool
-  4. Create Anthropic async client
-  5. Create APScheduler (shares uvicorn's event loop)
-  6. Register scheduled jobs
-  7. Start the scheduler
-  8. Schedule one-off startup tasks (metadata sync, bootstrap check)
+  3. Create integration clients used by the app
+  4. Create APScheduler (shares uvicorn's event loop)
+  5. Register scheduled jobs
+  6. Start the scheduler
+  7. Schedule one-off startup tasks (metadata refresh, bootstrap check)
 
 Shutdown sequence:
   1. Drain or cancel tracked startup tasks
   2. Shut down the APScheduler
-  3. Shut down the BigQuery executor thread pool
+  3. Shut down long-lived integration clients
   4. Dispose the SQLAlchemy engine
 """
 
@@ -162,8 +161,9 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="GDELT News Backend",
         description=(
-            "Production REST API integrating GDELT 2.0 via Google BigQuery. "
-            "Filters are normalized by Claude (Anthropic) and refreshed every 15 minutes."
+            "Production REST API for searching locally cached GDELT 2.0 events. "
+            "Filters are normalized by Claude (Anthropic), while metadata and ingestion "
+            "are refreshed by background jobs."
         ),
         version="1.0.0",
         lifespan=lifespan,

@@ -3,7 +3,7 @@ GET  /sync/status   — current sync state from PostgreSQL
 POST /sync/refresh  — manually trigger an immediate sync
 
 POST /sync/refresh is protected and has a 5-minute cooldown to prevent
-cost-amplifying abuse (each sync triggers 3 BigQuery queries).
+abuse from repeated metadata refresh requests.
 """
 
 from __future__ import annotations
@@ -73,8 +73,8 @@ async def get_sync_status(
     "/sync/refresh",
     summary="Manually trigger a GDELT sync",
     description=(
-        "Immediately triggers a GDELT metadata sync outside the 15-minute schedule. "
-        "Subject to a 5-minute cooldown to prevent cost abuse."
+        "Immediately triggers a metadata refresh outside the configured schedule. "
+        "Subject to a 5-minute cooldown to prevent repeated manual refreshes."
     ),
     tags=["Sync"],
 )
@@ -110,5 +110,5 @@ async def manual_sync_refresh(
 
     return {
         "status": "sync_triggered",
-        "message": "GDELT sync started. Check /sync/status for results.",
+        "message": "Metadata refresh started. Check /sync/status for results.",
     }
