@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import JSON, BigInteger, DateTime, Float, Index, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -118,7 +119,10 @@ class GdeltEvent(Base):
     source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     article_title: Mapped[str | None] = mapped_column(Text, nullable=True)
     article_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
-    sources: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    cited_sources: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    main_topics: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    keywords: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    entities: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     enrichment_status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
     enriched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     enrichment_error: Mapped[str | None] = mapped_column(Text, nullable=True)

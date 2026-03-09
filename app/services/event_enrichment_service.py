@@ -28,7 +28,37 @@ class EnrichedArticleContent(TypedDict):
 
     article_title: str | None
     article_summary: str | None
-    sources: list[str]
+    cited_sources: list[str]
+    main_topics: list[str]
+    keywords: list[str]
+    entities: dict[str, list[str]]
+
+
+class SuccessUpdatePayload(TypedDict):
+    """Typed repository kwargs for a successful enrichment update."""
+
+    article_title: str | None
+    article_summary: str | None
+    cited_sources: list[str]
+    main_topics: list[str]
+    keywords: list[str]
+    entities: dict[str, list[str]]
+    enriched_at: datetime
+
+
+def _build_success_payload(
+    enriched_article: EnrichedArticleContent,
+) -> SuccessUpdatePayload:
+    """Return repository kwargs for a successful enrichment update."""
+    return {
+        "article_title": enriched_article["article_title"],
+        "article_summary": enriched_article["article_summary"],
+        "cited_sources": enriched_article["cited_sources"],
+        "main_topics": enriched_article["main_topics"],
+        "keywords": enriched_article["keywords"],
+        "entities": enriched_article["entities"],
+        "enriched_at": _now_utc(),
+    }
 
 
 async def run_event_enrichment_batch(
@@ -53,13 +83,12 @@ async def run_event_enrichment_batch(
 
         try:
             if not _has_source_url(source_url):
-                await event_repository.mark_event_enrichment_failed(
+                persisted_failed_status = await _persist_failed_status(
                     session,
                     global_event_id,
                     error_message="missing source_url",
                 )
-                await _commit_transaction(session)
-                summary["failed"] += 1
+                summary[_failure_summary_bucket(persisted_failed_status)] += 1
                 continue
 
             claimed = await event_repository.mark_event_enrichment_processing(
@@ -76,13 +105,10 @@ async def run_event_enrichment_batch(
 
             extracted_article = await _extract_article_content(source_url)
             enriched_article = await _enrich_article_content(extracted_article)
-            updated = await event_repository.mark_event_enrichment_succeeded(
+            updated = await _persist_successful_enrichment(
                 session,
                 global_event_id,
-                article_title=enriched_article["article_title"],
-                article_summary=enriched_article["article_summary"],
-                sources=enriched_article["sources"],
-                enriched_at=_now_utc(),
+                enriched_article,
             )
             if not updated:
                 raise RuntimeError("success update returned no rows")
@@ -90,12 +116,12 @@ async def run_event_enrichment_batch(
             await _commit_transaction(session)
             summary["enriched"] += 1
         except Exception as exc:
-            await _record_row_failure(
+            persisted_failed_status = await _record_row_failure(
                 session,
                 global_event_id,
                 error_message=_stringify_error(exc),
             )
-            summary["failed"] += 1
+            summary[_failure_summary_bucket(persisted_failed_status)] += 1
             continue
 
     return summary
@@ -111,17 +137,55 @@ async def _record_row_failure(
     global_event_id: int,
     *,
     error_message: str,
-) -> None:
+) -> bool:
     """Rollback failed work and best-effort persist a failed status without leaving rows stuck."""
     await session.rollback()
 
+    return await _persist_failed_status(
+        session,
+        global_event_id,
+        error_message=error_message,
+    )
+
+
+async def _persist_successful_enrichment(
+    session: AsyncSession,
+    global_event_id: int,
+    enriched_article: EnrichedArticleContent,
+) -> bool:
+    """Persist a successful enrichment result for a claimed row."""
+    success_payload = _build_success_payload(enriched_article)
+    return await event_repository.mark_event_enrichment_succeeded(
+        session,
+        global_event_id,
+        article_title=success_payload["article_title"],
+        article_summary=success_payload["article_summary"],
+        cited_sources=success_payload["cited_sources"],
+        main_topics=success_payload["main_topics"],
+        keywords=success_payload["keywords"],
+        entities=success_payload["entities"],
+        enriched_at=success_payload["enriched_at"],
+    )
+
+
+async def _persist_failed_status(
+    session: AsyncSession,
+    global_event_id: int,
+    *,
+    error_message: str,
+) -> bool:
+    """Best-effort persist a failed status and log when the update is a no-op."""
+
     try:
-        await event_repository.mark_event_enrichment_failed(
+        updated = await event_repository.mark_event_enrichment_failed(
             session,
             global_event_id,
             error_message=error_message,
         )
+        if not updated:
+            raise RuntimeError("failure update returned no rows")
         await _commit_transaction(session)
+        return True
     except Exception as exc:
         await session.rollback()
         logger.error(
@@ -130,6 +194,15 @@ async def _record_row_failure(
             error_message=error_message,
             persistence_error=_stringify_error(exc),
         )
+        return False
+
+
+def _failure_summary_bucket(persisted_failed_status: bool) -> str:
+    """Return the summary bucket for a row-level failure outcome."""
+    if persisted_failed_status:
+        return "failed"
+
+    return "skipped"
 
 
 def _has_source_url(source_url: str | None) -> bool:
@@ -162,5 +235,8 @@ async def _enrich_article_content(
     return {
         "article_title": enriched_article.article_title,
         "article_summary": enriched_article.article_summary,
-        "sources": enriched_article.sources,
+        "cited_sources": enriched_article.cited_sources,
+        "main_topics": enriched_article.main_topics,
+        "keywords": enriched_article.keywords,
+        "entities": enriched_article.entities.model_dump(),
     }

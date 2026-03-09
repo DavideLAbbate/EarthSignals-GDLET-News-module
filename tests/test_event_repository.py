@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
@@ -183,16 +184,33 @@ async def test_bulk_insert_events_chunks_large_batches(db_session):
 
 def test_gdelt_event_model_includes_enrichment_fields():
     """The event model should expose the Phase 1 enrichment columns."""
+    model_columns = GdeltEvent.__table__.columns.keys()
     expected_columns = {
         "article_title",
         "article_summary",
-        "sources",
+        "cited_sources",
+        "main_topics",
+        "keywords",
+        "entities",
         "enrichment_status",
         "enriched_at",
         "enrichment_error",
     }
 
-    assert expected_columns.issubset(GdeltEvent.__table__.columns.keys())
+    assert "cited_sources" in model_columns
+    assert "sources" not in model_columns
+    assert expected_columns.issubset(model_columns)
+
+
+def test_mark_event_enrichment_succeeded_accepts_expanded_strict_payload():
+    """Successful enrichment persistence should expose the full strict Phase 3 payload."""
+    parameter_names = inspect.signature(event_repository.mark_event_enrichment_succeeded).parameters
+
+    assert "cited_sources" in parameter_names
+    assert "main_topics" in parameter_names
+    assert "keywords" in parameter_names
+    assert "entities" in parameter_names
+    assert "sources" not in parameter_names
 
 
 @pytest.mark.asyncio
@@ -209,7 +227,10 @@ async def test_bulk_insert_events_sets_default_enrichment_state(db_session, samp
     assert inserted == 1
     assert event.article_title is None
     assert event.article_summary is None
-    assert event.sources is None
+    assert event.cited_sources is None
+    assert event.main_topics is None
+    assert event.keywords is None
+    assert event.entities is None
     assert event.enrichment_status == "pending"
     assert event.enriched_at is None
     assert event.enrichment_error is None
@@ -269,7 +290,21 @@ async def test_enrichment_state_transition_helpers_persist_expected_fields(
         **sample_events[1],
         "article_title": "Existing title",
         "article_summary": "Existing summary",
-        "sources": [{"name": "AP", "url": "https://example.com/ap"}],
+        "cited_sources": ["AP"],
+        "main_topics": ["diplomacy"],
+        "keywords": ["summit", "talks"],
+        "entities": {
+            "persons_cited": ["Jane Doe"],
+            "organizations_cited": ["AP"],
+            "locations": ["Paris"],
+            "ethnicities_cited": [],
+            "religions_cited": [],
+            "occupations_cited": ["spokesperson"],
+            "political_affiliations_cited": [],
+            "industries_cited": ["media"],
+            "products_cited": [],
+            "brands_cited": [],
+        },
     }
     await event_repository.bulk_insert_events(db_session, [sample_events[0]])
     await event_repository.bulk_insert_events(db_session, [failure_event])
@@ -295,7 +330,21 @@ async def test_enrichment_state_transition_helpers_persist_expected_fields(
         sample_events[0]["global_event_id"],
         article_title="Resolved title",
         article_summary="Resolved summary",
-        sources=[{"name": "Reuters", "url": "https://example.com/source"}],
+        cited_sources=["Reuters"],
+        main_topics=["trade", "sanctions"],
+        keywords=["tariffs", "summit"],
+        entities={
+            "persons_cited": ["Jane Doe"],
+            "organizations_cited": ["Reuters"],
+            "locations": ["Geneva"],
+            "ethnicities_cited": [],
+            "religions_cited": [],
+            "occupations_cited": ["diplomat"],
+            "political_affiliations_cited": [],
+            "industries_cited": ["trade"],
+            "products_cited": ["tariffs"],
+            "brands_cited": [],
+        },
         enriched_at=enriched_at,
     )
     await db_session.commit()
@@ -307,7 +356,21 @@ async def test_enrichment_state_transition_helpers_persist_expected_fields(
 
     assert enriched_event.article_title == "Resolved title"
     assert enriched_event.article_summary == "Resolved summary"
-    assert enriched_event.sources == [{"name": "Reuters", "url": "https://example.com/source"}]
+    assert enriched_event.cited_sources == ["Reuters"]
+    assert enriched_event.main_topics == ["trade", "sanctions"]
+    assert enriched_event.keywords == ["tariffs", "summit"]
+    assert enriched_event.entities == {
+        "persons_cited": ["Jane Doe"],
+        "organizations_cited": ["Reuters"],
+        "locations": ["Geneva"],
+        "ethnicities_cited": [],
+        "religions_cited": [],
+        "occupations_cited": ["diplomat"],
+        "political_affiliations_cited": [],
+        "industries_cited": ["trade"],
+        "products_cited": ["tariffs"],
+        "brands_cited": [],
+    }
     assert enriched_event.enrichment_status == "enriched"
     assert enriched_event.enriched_at == enriched_at
     assert enriched_event.enrichment_error is None
@@ -332,6 +395,20 @@ async def test_enrichment_state_transition_helpers_persist_expected_fields(
 
     assert failed_event.article_title == "Existing title"
     assert failed_event.article_summary == "Existing summary"
-    assert failed_event.sources == [{"name": "AP", "url": "https://example.com/ap"}]
+    assert failed_event.cited_sources == ["AP"]
+    assert failed_event.main_topics == ["diplomacy"]
+    assert failed_event.keywords == ["summit", "talks"]
+    assert failed_event.entities == {
+        "persons_cited": ["Jane Doe"],
+        "organizations_cited": ["AP"],
+        "locations": ["Paris"],
+        "ethnicities_cited": [],
+        "religions_cited": [],
+        "occupations_cited": ["spokesperson"],
+        "political_affiliations_cited": [],
+        "industries_cited": ["media"],
+        "products_cited": [],
+        "brands_cited": [],
+    }
     assert failed_event.enrichment_status == "failed"
     assert failed_event.enrichment_error == "upstream timeout"

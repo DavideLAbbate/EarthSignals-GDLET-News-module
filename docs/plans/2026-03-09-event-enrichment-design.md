@@ -3,54 +3,66 @@
 Date: 2026-03-09  
 Status: Approved
 
-## Problem
-
-Event records need richer article metadata for downstream consumers, but enrichment must remain bounded, deterministic, and simple to operate.
-
 ## Goal
 
-Add database-backed enrichment that stores only `article_title`, `article_summary`, and `sources`, without persisting full article content.
+Expand the existing event enrichment milestone to persist a broader semantic payload while keeping the current backend-driven enrichment pipeline, scheduler, and deterministic fetch-and-extract flow unchanged.
 
-## Architecture
+## New Storage Model
 
-Enrichment is a DB-only backend capability. On a 30-minute schedule, the backend selects events needing enrichment, performs deterministic article fetch + extraction, and then calls a separate internal enrichment service. That service does not fetch HTML; it returns exactly `article_title`, `article_summary`, and `sources`, which are written back to the event record.
+Approved storage approach is option 1: store stable top-level fields as dedicated columns on `gdelt_events`, and store only the entity breakdown as a single JSON field.
 
-## Components
+Persist the following enrichment fields on `gdelt_events`:
 
-- Scheduler trigger running every 30 minutes
-- Backend enrichment workflow for deterministic fetch + extraction
-- Separate internal enrichment service returning `article_title`, `article_summary`, and `sources`
-- Event lifecycle state tracking: `pending`, `processing`, `enriched`, `failed`
-- Database fields for `article_title`, `article_summary`, and `sources`
+- `article_title`
+- `article_summary`
+- `cited_sources` (JSON array)
+- `main_topics` (JSON array)
+- `keywords` (JSON array)
+- `entities` (JSON object)
+- existing technical fields `enrichment_status`, `enriched_at`, `enrichment_error`
 
-## Data Flow
+The previous `sources` field is renamed to `cited_sources` to better reflect that the values represent sources cited by the article, not source ingestion metadata.
 
-1. Events requiring enrichment are marked `pending`.
-2. The scheduled job selects pending records and moves them to `processing`.
-3. The backend fetches the article HTML and performs deterministic extraction.
-4. The backend calls the internal enrichment service with the extracted input.
-5. The service returns exactly `article_title`, `article_summary`, and `sources`.
-6. The event is updated to `enriched` on success or `failed` on terminal failure.
+## Internal Service Response Contract
 
-## Database Changes
+The internal enrichment service continues to receive extracted article input from the backend and must now return the following payload shape:
 
-- Add enrichment state field with values `pending`, `processing`, `enriched`, `failed`
-- Add `article_title`
-- Add `article_summary`
-- Add `sources` stored as a JSON array of strings
+```json
+{
+  "article_title": "string | null",
+  "article_summary": "string | null",
+  "cited_sources": ["string"],
+  "main_topics": ["string"],
+  "keywords": ["string"],
+  "entities": {
+    "persons_cited": ["string"],
+    "organizations_cited": ["string"],
+    "locations": ["string"],
+    "ethnicities_cited": ["string"],
+    "religions_cited": ["string"],
+    "occupations_cited": ["string"],
+    "political_affiliations_cited": ["string"],
+    "industries_cited": ["string"],
+    "products_cited": ["string"],
+    "brands_cited": ["string"]
+  }
+}
+```
 
-## Failure And Retry Rules
+This payload remains bounded and article-level. Full article content, raw extraction output, and intermediate model artifacts are still not persisted.
 
-Processing starts from `pending`, is locked as `processing`, and ends as `enriched` or `failed`. Retry behavior is driven by the 30-minute scheduled job. Terminal failures remain `failed` until explicitly re-queued by backend logic or future operational tooling.
+## Migration Impact
+
+- add new columns for `cited_sources`, `main_topics`, `keywords`, and `entities`
+- rename the existing `sources` column to `cited_sources`
+- update the enrichment write path, read models, and any internal serializers to use the renamed field and expanded payload
+- preserve existing enrichment lifecycle handling through `enrichment_status`, `enriched_at`, and `enrichment_error`
+
+No scheduler redesign or pipeline restructuring is required; this is a schema and contract expansion on top of the current enrichment milestone.
 
 ## Out Of Scope
 
-- Persisting full article bodies or raw HTML
-- HTML fetching inside the internal enrichment service
-- Client-side fetching or extraction
-- Non-deterministic enrichment pipelines
-- Public enrichment endpoints
-
-## Notes
-
-This design keeps enrichment intentionally narrow: database updates only, deterministic fetch + extraction in the backend, and a separate internal enrichment service that returns only `article_title`, `article_summary`, and `sources`.
+- changing how the scheduler selects or retries events
+- moving HTML fetching or extraction into the internal enrichment service
+- persisting full article bodies, raw HTML, or model reasoning output
+- introducing public enrichment endpoints or client-facing ingestion changes

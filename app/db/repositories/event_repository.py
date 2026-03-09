@@ -134,7 +134,10 @@ async def mark_event_enrichment_succeeded(
     *,
     article_title: str | None,
     article_summary: str | None,
-    sources: list[str] | None,
+    cited_sources: list[str] | None = None,
+    main_topics: list[str] | None = None,
+    keywords: list[str] | None = None,
+    entities: dict[str, list[str]] | None = None,
     enriched_at: datetime,
 ) -> bool:
     """Persist a successful enrichment result for a processing event."""
@@ -147,7 +150,10 @@ async def mark_event_enrichment_succeeded(
         .values(
             article_title=article_title,
             article_summary=article_summary,
-            sources=sources,
+            cited_sources=cited_sources,
+            main_topics=main_topics,
+            keywords=keywords,
+            entities=entities,
             enrichment_status="enriched",
             enriched_at=enriched_at,
             enrichment_error=None,

@@ -10,8 +10,33 @@ from sqlalchemy import select
 
 from app.db.models import GdeltEvent
 from app.db.repositories import event_repository
-from app.schemas.event_enrichment import EventEnrichmentResponse
+from app.schemas.event_enrichment import EventEnrichmentEntities, EventEnrichmentResponse
 from app.services import event_enrichment_service
+
+
+def _enriched_payload(**overrides: object) -> dict[str, object]:
+    """Return a strict enrichment payload for service tests."""
+    payload: dict[str, object] = {
+        "article_title": "Enriched title",
+        "article_summary": "Enriched summary",
+        "cited_sources": ["Reuters", "AP"],
+        "main_topics": ["Diplomacy", "Trade"],
+        "keywords": ["summit", "sanctions"],
+        "entities": {
+            "persons_cited": ["Jane Doe"],
+            "organizations_cited": ["United Nations"],
+            "locations": ["Geneva"],
+            "ethnicities_cited": ["Kurdish"],
+            "religions_cited": ["Catholic"],
+            "occupations_cited": ["diplomat"],
+            "political_affiliations_cited": ["Labour"],
+            "industries_cited": ["energy"],
+            "products_cited": ["oil futures"],
+            "brands_cited": ["Shell"],
+        },
+    }
+    payload.update(overrides)
+    return payload
 
 
 @pytest.fixture
@@ -92,13 +117,7 @@ async def test_run_event_enrichment_batch_processes_rows_independently(
             RuntimeError("extract failed"),
         ]
     )
-    enrich_mock = AsyncMock(
-        return_value={
-            "article_title": "Enriched title",
-            "article_summary": "Enriched summary",
-            "sources": ["Reuters", "AP"],
-        }
-    )
+    enrich_mock = AsyncMock(return_value=_enriched_payload())
 
     with (
         patch.object(event_enrichment_service, "_extract_article_content", extract_mock),
@@ -116,7 +135,21 @@ async def test_run_event_enrichment_batch_processes_rows_independently(
     assert events[2234567890123].enrichment_status == "enriched"
     assert events[2234567890123].article_title == "Enriched title"
     assert events[2234567890123].article_summary == "Enriched summary"
-    assert events[2234567890123].sources == ["Reuters", "AP"]
+    assert events[2234567890123].cited_sources == ["Reuters", "AP"]
+    assert events[2234567890123].main_topics == ["Diplomacy", "Trade"]
+    assert events[2234567890123].keywords == ["summit", "sanctions"]
+    assert events[2234567890123].entities == {
+        "persons_cited": ["Jane Doe"],
+        "organizations_cited": ["United Nations"],
+        "locations": ["Geneva"],
+        "ethnicities_cited": ["Kurdish"],
+        "religions_cited": ["Catholic"],
+        "occupations_cited": ["diplomat"],
+        "political_affiliations_cited": ["Labour"],
+        "industries_cited": ["energy"],
+        "products_cited": ["oil futures"],
+        "brands_cited": ["Shell"],
+    }
     assert events[2234567890123].enriched_at is not None
     assert events[2234567890123].enrichment_error is None
 
@@ -150,6 +183,46 @@ async def test_run_event_enrichment_batch_counts_missing_source_url_as_failed(
 
 
 @pytest.mark.asyncio
+async def test_run_event_enrichment_batch_logs_when_missing_source_url_failure_update_is_noop(
+    db_session,
+    enrichment_events,
+):
+    """A no-op missing-source failure update should be logged and leave the row retryable."""
+    await event_repository.bulk_insert_events(db_session, [enrichment_events[1]])
+    await db_session.commit()
+
+    logger_mock = MagicMock()
+
+    with (
+        patch.object(event_enrichment_service, "logger", logger_mock),
+        patch.object(
+            event_repository,
+            "mark_event_enrichment_failed",
+            AsyncMock(return_value=False),
+        ),
+    ):
+        summary = await event_enrichment_service.run_event_enrichment_batch(
+            db_session, batch_size=10
+        )
+
+    assert summary == {"selected": 1, "enriched": 0, "failed": 0, "skipped": 1}
+    logger_mock.error.assert_called_once_with(
+        "event_enrichment_failure_persistence_failed",
+        global_event_id=2234567890124,
+        error_message="missing source_url",
+        persistence_error="failure update returned no rows",
+    )
+
+    result = await db_session.execute(
+        select(GdeltEvent).where(GdeltEvent.global_event_id == 2234567890124)
+    )
+    event = result.scalar_one()
+
+    assert event.enrichment_status == "pending"
+    assert event.enrichment_error is None
+
+
+@pytest.mark.asyncio
 async def test_run_event_enrichment_batch_only_selects_pending_rows(
     db_session,
     enrichment_events,
@@ -170,7 +243,25 @@ async def test_run_event_enrichment_batch_only_selects_pending_rows(
 
     extract_mock = AsyncMock(return_value={"title": "Extracted title", "content": "Extracted body"})
     enrich_mock = AsyncMock(
-        return_value={"article_title": "Done", "article_summary": "Done", "sources": []}
+        return_value=_enriched_payload(
+            article_title="Done",
+            article_summary="Done",
+            cited_sources=[],
+            main_topics=[],
+            keywords=[],
+            entities={
+                "persons_cited": [],
+                "organizations_cited": [],
+                "locations": [],
+                "ethnicities_cited": [],
+                "religions_cited": [],
+                "occupations_cited": [],
+                "political_affiliations_cited": [],
+                "industries_cited": [],
+                "products_cited": [],
+                "brands_cited": [],
+            },
+        )
     )
 
     with (
@@ -215,7 +306,21 @@ async def test_run_event_enrichment_batch_uses_real_extract_composition_path(
         return_value=EventEnrichmentResponse(
             article_title="Semantic title",
             article_summary="Semantic summary",
-            sources=["Reuters", "AP"],
+            cited_sources=["Reuters", "AP"],
+            main_topics=["Diplomacy", "Trade"],
+            keywords=["summit", "sanctions"],
+            entities=EventEnrichmentEntities(
+                persons_cited=["Jane Doe"],
+                organizations_cited=["United Nations"],
+                locations=["Geneva"],
+                ethnicities_cited=["Kurdish"],
+                religions_cited=["Catholic"],
+                occupations_cited=["diplomat"],
+                political_affiliations_cited=["Labour"],
+                industries_cited=["energy"],
+                products_cited=["oil futures"],
+                brands_cited=["Shell"],
+            ),
         )
     )
 
@@ -244,7 +349,21 @@ async def test_run_event_enrichment_batch_uses_real_extract_composition_path(
     assert event.enrichment_status == "enriched"
     assert event.article_title == "Semantic title"
     assert event.article_summary == "Semantic summary"
-    assert event.sources == ["Reuters", "AP"]
+    assert event.cited_sources == ["Reuters", "AP"]
+    assert event.main_topics == ["Diplomacy", "Trade"]
+    assert event.keywords == ["summit", "sanctions"]
+    assert event.entities == {
+        "persons_cited": ["Jane Doe"],
+        "organizations_cited": ["United Nations"],
+        "locations": ["Geneva"],
+        "ethnicities_cited": ["Kurdish"],
+        "religions_cited": ["Catholic"],
+        "occupations_cited": ["diplomat"],
+        "political_affiliations_cited": ["Labour"],
+        "industries_cited": ["energy"],
+        "products_cited": ["oil futures"],
+        "brands_cited": ["Shell"],
+    }
     enrich_client_mock.assert_awaited_once_with(
         {"title": "Phase 3 Title", "content": "First paragraph.\n\nSecond paragraph."}
     )
@@ -268,16 +387,16 @@ async def test_run_event_enrichment_batch_continues_after_persistence_failure(
     )
     enrich_mock = AsyncMock(
         side_effect=[
-            {
-                "article_title": "Enriched title 1",
-                "article_summary": "Enriched summary 1",
-                "sources": [],
-            },
-            {
-                "article_title": "Enriched title 2",
-                "article_summary": "Enriched summary 2",
-                "sources": [],
-            },
+            _enriched_payload(
+                article_title="Enriched title 1",
+                article_summary="Enriched summary 1",
+                cited_sources=[],
+            ),
+            _enriched_payload(
+                article_title="Enriched title 2",
+                article_summary="Enriched summary 2",
+                cited_sources=[],
+            ),
         ]
     )
 
@@ -328,16 +447,16 @@ async def test_run_event_enrichment_batch_does_not_count_false_success_update_as
     )
     enrich_mock = AsyncMock(
         side_effect=[
-            {
-                "article_title": "Enriched title 1",
-                "article_summary": "Enriched summary 1",
-                "sources": [],
-            },
-            {
-                "article_title": "Enriched title 2",
-                "article_summary": "Enriched summary 2",
-                "sources": [],
-            },
+            _enriched_payload(
+                article_title="Enriched title 1",
+                article_summary="Enriched summary 1",
+                cited_sources=[],
+            ),
+            _enriched_payload(
+                article_title="Enriched title 2",
+                article_summary="Enriched summary 2",
+                cited_sources=[],
+            ),
         ]
     )
 
@@ -388,11 +507,11 @@ async def test_run_event_enrichment_batch_logs_when_failure_persistence_also_fai
         ]
     )
     enrich_mock = AsyncMock(
-        return_value={
-            "article_title": "Enriched title 2",
-            "article_summary": "Enriched summary 2",
-            "sources": [],
-        }
+        return_value=_enriched_payload(
+            article_title="Enriched title 2",
+            article_summary="Enriched summary 2",
+            cited_sources=[],
+        )
     )
     logger_mock = MagicMock()
 
@@ -417,12 +536,73 @@ async def test_run_event_enrichment_batch_logs_when_failure_persistence_also_fai
             db_session, batch_size=10
         )
 
-    assert summary == {"selected": 2, "enriched": 1, "failed": 1, "skipped": 0}
+    assert summary == {"selected": 2, "enriched": 1, "failed": 0, "skipped": 1}
     logger_mock.error.assert_called_once_with(
         "event_enrichment_failure_persistence_failed",
         global_event_id=2234567890123,
         error_message="extract failed",
         persistence_error="failed status write failed",
+    )
+
+    result = await db_session.execute(select(GdeltEvent).order_by(GdeltEvent.global_event_id.asc()))
+    events = {event.global_event_id: event for event in result.scalars().all()}
+
+    assert events[2234567890123].enrichment_status == "pending"
+    assert events[2234567890125].enrichment_status == "enriched"
+
+
+@pytest.mark.asyncio
+async def test_run_event_enrichment_batch_logs_when_failure_update_returns_no_rows(
+    db_session,
+    enrichment_events,
+):
+    """A no-op failure update after row processing should be logged and later rows should continue."""
+    pending_events = [enrichment_events[0], enrichment_events[2]]
+    await event_repository.bulk_insert_events(db_session, pending_events)
+    await db_session.commit()
+
+    extract_mock = AsyncMock(
+        side_effect=[
+            RuntimeError("extract failed"),
+            {"title": "Extracted title 2", "content": "Extracted body 2"},
+        ]
+    )
+    enrich_mock = AsyncMock(
+        return_value=_enriched_payload(
+            article_title="Enriched title 2",
+            article_summary="Enriched summary 2",
+            cited_sources=[],
+        )
+    )
+    logger_mock = MagicMock()
+
+    original_mark_failed = event_repository.mark_event_enrichment_failed
+
+    async def noop_first_row_mark_failed(session, global_event_id, **kwargs):
+        if global_event_id == 2234567890123:
+            return False
+        return await original_mark_failed(session, global_event_id, **kwargs)
+
+    with (
+        patch.object(event_enrichment_service, "_extract_article_content", extract_mock),
+        patch.object(event_enrichment_service, "_enrich_article_content", enrich_mock),
+        patch.object(event_enrichment_service, "logger", logger_mock),
+        patch.object(
+            event_repository,
+            "mark_event_enrichment_failed",
+            side_effect=noop_first_row_mark_failed,
+        ),
+    ):
+        summary = await event_enrichment_service.run_event_enrichment_batch(
+            db_session, batch_size=10
+        )
+
+    assert summary == {"selected": 2, "enriched": 1, "failed": 0, "skipped": 1}
+    logger_mock.error.assert_called_once_with(
+        "event_enrichment_failure_persistence_failed",
+        global_event_id=2234567890123,
+        error_message="extract failed",
+        persistence_error="failure update returned no rows",
     )
 
     result = await db_session.execute(select(GdeltEvent).order_by(GdeltEvent.global_event_id.asc()))
@@ -442,9 +622,11 @@ async def test_run_event_enrichment_batch_keeps_rows_retryable_after_success_per
     await db_session.commit()
 
     extract_mock = AsyncMock(return_value={"title": "Extracted title", "content": "Extracted body"})
+    enrich_mock = AsyncMock(return_value=_enriched_payload())
 
     with (
         patch.object(event_enrichment_service, "_extract_article_content", extract_mock),
+        patch.object(event_enrichment_service, "_enrich_article_content", enrich_mock),
         patch.object(
             event_repository,
             "mark_event_enrichment_succeeded",
@@ -460,7 +642,7 @@ async def test_run_event_enrichment_batch_keeps_rows_retryable_after_success_per
             db_session, batch_size=10
         )
 
-    assert summary == {"selected": 1, "enriched": 0, "failed": 1, "skipped": 0}
+    assert summary == {"selected": 1, "enriched": 0, "failed": 0, "skipped": 1}
 
     result = await db_session.execute(
         select(GdeltEvent).where(GdeltEvent.global_event_id == 2234567890123)
