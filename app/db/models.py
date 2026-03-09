@@ -116,6 +116,12 @@ class GdeltEvent(Base):
         String(2), nullable=True, index=True
     )
     source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    article_title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    article_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sources: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    enrichment_status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    enriched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    enrichment_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class IngestionState(Base):

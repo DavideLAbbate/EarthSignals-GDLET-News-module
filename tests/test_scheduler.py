@@ -1,4 +1,4 @@
-"""Tests for scheduler startup ingestion behavior."""
+"""Tests for scheduler startup and runtime behavior."""
 
 from __future__ import annotations
 
@@ -68,3 +68,48 @@ async def test_trigger_startup_ingestion_skips_bootstrap_when_events_exist(db_se
         await scheduler.trigger_startup_ingestion_if_needed()
 
     run_bootstrap.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_event_enrichment_job_uses_session_and_service_batch_size():
+    """The scheduled enrichment job should open a DB session and call the real service."""
+    from app.scheduler import scheduler
+
+    session = MagicMock()
+    context_manager = MagicMock()
+    context_manager.__aenter__ = AsyncMock(return_value=session)
+    context_manager.__aexit__ = AsyncMock(return_value=False)
+    session_factory = MagicMock(return_value=context_manager)
+
+    import unittest.mock
+
+    with (
+        unittest.mock.patch("app.scheduler.scheduler.get_settings") as get_settings,
+        unittest.mock.patch(
+            "app.scheduler.scheduler.run_event_enrichment_batch",
+            new_callable=AsyncMock,
+        ) as run_batch,
+    ):
+        get_settings.return_value.event_enrichment_batch_size = 250
+        run_batch.return_value = {"selected": 3, "enriched": 2, "failed": 1, "skipped": 0}
+
+        summary = await scheduler.run_event_enrichment_job(session_factory)
+
+    assert summary == {"selected": 3, "enriched": 2, "failed": 1, "skipped": 0}
+    session_factory.assert_called_once_with()
+    run_batch.assert_awaited_once_with(session, batch_size=250)
+
+
+@pytest.mark.asyncio
+async def test_run_ingestion_job_rejects_invalid_job_type():
+    """Invalid ingestion job types should fail fast instead of silently running incremental."""
+    from app.scheduler import scheduler
+
+    session = MagicMock()
+    context_manager = MagicMock()
+    context_manager.__aenter__ = AsyncMock(return_value=session)
+    context_manager.__aexit__ = AsyncMock(return_value=False)
+    session_factory = MagicMock(return_value=context_manager)
+
+    with pytest.raises(ValueError, match="invalid ingestion job_type: unexpected"):
+        await scheduler.run_ingestion_job(session_factory, "unexpected")

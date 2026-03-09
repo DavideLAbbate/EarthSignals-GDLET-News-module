@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from sqlalchemy import select
 
+from app.db.models import GdeltEvent
 from app.db.repositories import event_repository
 
 
@@ -176,3 +179,159 @@ async def test_bulk_insert_events_chunks_large_batches(db_session):
 
     count = await event_repository.get_event_count(db_session)
     assert count == 2000
+
+
+def test_gdelt_event_model_includes_enrichment_fields():
+    """The event model should expose the Phase 1 enrichment columns."""
+    expected_columns = {
+        "article_title",
+        "article_summary",
+        "sources",
+        "enrichment_status",
+        "enriched_at",
+        "enrichment_error",
+    }
+
+    assert expected_columns.issubset(GdeltEvent.__table__.columns.keys())
+
+
+@pytest.mark.asyncio
+async def test_bulk_insert_events_sets_default_enrichment_state(db_session, sample_events):
+    """New events should default to a pending enrichment state."""
+    inserted = await event_repository.bulk_insert_events(db_session, [sample_events[0]])
+    await db_session.commit()
+
+    result = await db_session.execute(
+        select(GdeltEvent).where(GdeltEvent.global_event_id == sample_events[0]["global_event_id"])
+    )
+    event = result.scalar_one()
+
+    assert inserted == 1
+    assert event.article_title is None
+    assert event.article_summary is None
+    assert event.sources is None
+    assert event.enrichment_status == "pending"
+    assert event.enriched_at is None
+    assert event.enrichment_error is None
+
+
+@pytest.mark.asyncio
+async def test_get_pending_enrichment_candidates_orders_rows_deterministically(
+    db_session,
+    sample_events,
+):
+    """Pending candidates should be selected oldest-first with a stable tie-breaker."""
+    pending_events = [
+        sample_events[1],
+        {
+            **sample_events[0],
+            "global_event_id": 1234567890125,
+            "date_added": 20260301000000,
+            "source_url": "https://example.com/article3",
+        },
+        {
+            **sample_events[0],
+            "global_event_id": 1234567890122,
+            "date_added": 20260301000000,
+            "source_url": "https://example.com/article0",
+        },
+    ]
+    await event_repository.bulk_insert_events(db_session, pending_events)
+    await event_repository.bulk_insert_events(
+        db_session,
+        [
+            {
+                **sample_events[0],
+                "global_event_id": 1234567890999,
+                "date_added": 20260228000000,
+                "source_url": "https://example.com/already-enriched",
+                "enrichment_status": "enriched",
+            }
+        ],
+    )
+    await db_session.commit()
+
+    selected = await event_repository.get_pending_enrichment_candidates(db_session, limit=3)
+
+    assert [event.global_event_id for event in selected] == [
+        1234567890122,
+        1234567890125,
+        1234567890124,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_enrichment_state_transition_helpers_persist_expected_fields(
+    db_session, sample_events
+):
+    """Repository helpers should persist processing, success, and failure states."""
+    failure_event = {
+        **sample_events[1],
+        "article_title": "Existing title",
+        "article_summary": "Existing summary",
+        "sources": [{"name": "AP", "url": "https://example.com/ap"}],
+    }
+    await event_repository.bulk_insert_events(db_session, [sample_events[0]])
+    await event_repository.bulk_insert_events(db_session, [failure_event])
+    await db_session.commit()
+
+    await event_repository.mark_event_enrichment_processing(
+        db_session,
+        sample_events[0]["global_event_id"],
+    )
+    await db_session.commit()
+
+    result = await db_session.execute(
+        select(GdeltEvent).where(GdeltEvent.global_event_id == sample_events[0]["global_event_id"])
+    )
+    processing_event = result.scalar_one()
+
+    assert processing_event.enrichment_status == "processing"
+    assert processing_event.enrichment_error is None
+
+    enriched_at = datetime(2026, 3, 9, 12, 0, tzinfo=timezone.utc)
+    await event_repository.mark_event_enrichment_succeeded(
+        db_session,
+        sample_events[0]["global_event_id"],
+        article_title="Resolved title",
+        article_summary="Resolved summary",
+        sources=[{"name": "Reuters", "url": "https://example.com/source"}],
+        enriched_at=enriched_at,
+    )
+    await db_session.commit()
+
+    result = await db_session.execute(
+        select(GdeltEvent).where(GdeltEvent.global_event_id == sample_events[0]["global_event_id"])
+    )
+    enriched_event = result.scalar_one()
+
+    assert enriched_event.article_title == "Resolved title"
+    assert enriched_event.article_summary == "Resolved summary"
+    assert enriched_event.sources == [{"name": "Reuters", "url": "https://example.com/source"}]
+    assert enriched_event.enrichment_status == "enriched"
+    assert enriched_event.enriched_at == enriched_at
+    assert enriched_event.enrichment_error is None
+
+    await event_repository.mark_event_enrichment_processing(
+        db_session,
+        failure_event["global_event_id"],
+    )
+    await db_session.commit()
+
+    await event_repository.mark_event_enrichment_failed(
+        db_session,
+        failure_event["global_event_id"],
+        error_message="upstream timeout",
+    )
+    await db_session.commit()
+
+    result = await db_session.execute(
+        select(GdeltEvent).where(GdeltEvent.global_event_id == failure_event["global_event_id"])
+    )
+    failed_event = result.scalar_one()
+
+    assert failed_event.article_title == "Existing title"
+    assert failed_event.article_summary == "Existing summary"
+    assert failed_event.sources == [{"name": "AP", "url": "https://example.com/ap"}]
+    assert failed_event.enrichment_status == "failed"
+    assert failed_event.enrichment_error == "upstream timeout"

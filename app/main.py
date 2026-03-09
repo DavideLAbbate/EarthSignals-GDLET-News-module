@@ -3,23 +3,25 @@ FastAPI application factory and lifespan manager.
 
 Startup sequence (in lifespan):
   1. Configure structlog
-  2. Validate settings (fail fast if required env vars missing)
+  2. Validate settings (fail fast if required vars are missing)
   3. Create BigQuery client + executor thread pool
   4. Create Anthropic async client
   5. Create APScheduler (shares uvicorn's event loop)
-  6. Register the 15-minute sync job
-  7. Run an initial sync immediately
-  8. Start the scheduler
+  6. Register scheduled jobs
+  7. Start the scheduler
+  8. Schedule one-off startup tasks (metadata sync, bootstrap check)
 
 Shutdown sequence:
-  1. Shut down the APScheduler
-  2. Shut down the BigQuery executor thread pool
-  3. Dispose the SQLAlchemy engine
+  1. Drain or cancel tracked startup tasks
+  2. Shut down the APScheduler
+  3. Shut down the BigQuery executor thread pool
+  4. Dispose the SQLAlchemy engine
 """
 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -44,6 +46,61 @@ from app.scheduler.scheduler import (
 
 logger = get_logger(__name__)
 
+STARTUP_TASK_SHUTDOWN_TIMEOUT_SECONDS = 1.0
+
+
+async def _run_logged_startup_task(task_name: str, coroutine: Awaitable[object]) -> None:
+    """Run a startup task and log failures so they are never left unobserved."""
+    try:
+        await coroutine
+    except asyncio.CancelledError:
+        logger.info("startup_task_cancelled", task_name=task_name)
+        raise
+    except Exception as exc:
+        logger.error(
+            "startup_task_failed",
+            task_name=task_name,
+            error=str(exc),
+        )
+
+
+def _schedule_startup_task(
+    app: FastAPI, task_name: str, coroutine: Awaitable[object]
+) -> asyncio.Task:
+    """Create, name, and track a startup task for coordinated shutdown."""
+    startup_tasks = app.state.startup_tasks
+    task = asyncio.create_task(
+        _run_logged_startup_task(task_name, coroutine),
+        name=f"startup:{task_name}",
+    )
+    startup_tasks.append(task)
+    return task
+
+
+async def _shutdown_startup_tasks(
+    startup_tasks: list[asyncio.Task],
+    *,
+    timeout_seconds: float = STARTUP_TASK_SHUTDOWN_TIMEOUT_SECONDS,
+) -> None:
+    """Wait briefly for startup tasks, then cancel any that are still running."""
+    if not startup_tasks:
+        return
+
+    tracked_startup_tasks = list(startup_tasks)
+    done, pending = await asyncio.wait(tracked_startup_tasks, timeout=timeout_seconds)
+    if pending:
+        logger.info(
+            "startup_tasks_cancelling",
+            pending_count=len(pending),
+            timeout_seconds=timeout_seconds,
+        )
+        for task in pending:
+            task.cancel()
+
+        await asyncio.gather(*pending, return_exceptions=True)
+
+    startup_tasks.clear()
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -65,6 +122,7 @@ async def lifespan(app: FastAPI):
     # ── Anthropic client ───────────────────────────────────────────────────
     anthropic_client = create_anthropic_client()
     app.state.anthropic_client = anthropic_client
+    app.state.startup_tasks = []
 
     # ── Scheduler ──────────────────────────────────────────────────────────
     scheduler = create_scheduler()
@@ -76,14 +134,16 @@ async def lifespan(app: FastAPI):
     # ── Initial sync on startup ────────────────────────────────────────────
     # Run async to not block startup — errors are handled inside sync_job
     if settings.enable_metadata_sync:
-        asyncio.create_task(trigger_sync_now(bq_client))
-    asyncio.create_task(trigger_startup_ingestion_if_needed())
+        _schedule_startup_task(app, "metadata_sync", trigger_sync_now(bq_client))
+    _schedule_startup_task(app, "startup_ingestion", trigger_startup_ingestion_if_needed())
 
     logger.info("application_ready")
     yield
 
     # ── Shutdown ───────────────────────────────────────────────────────────
     logger.info("application_shutdown_start")
+
+    await _shutdown_startup_tasks(app.state.startup_tasks)
 
     if scheduler.running:
         scheduler.shutdown(wait=False)

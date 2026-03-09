@@ -85,3 +85,11 @@ class LocalQueryError(GDELTBackendError):
     def __init__(self, message: str) -> None:
         super().__init__(message)
         self.message = message
+
+
+class ArticleProcessingError(GDELTBackendError):
+    """Raised when deterministic article fetching or extraction fails."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import math
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -90,6 +91,89 @@ async def get_events_paginated(
     stmt = select(GdeltEvent).order_by(GdeltEvent.date_added.desc()).offset(offset).limit(limit)
     result = await session.execute(stmt)
     return result.scalars().all()
+
+
+async def get_pending_enrichment_candidates(
+    session: AsyncSession,
+    limit: int,
+) -> Sequence[GdeltEvent]:
+    """Return pending enrichment candidates in a deterministic order."""
+    if limit <= 0:
+        return []
+
+    stmt = (
+        select(GdeltEvent)
+        .where(GdeltEvent.enrichment_status == "pending")
+        .order_by(GdeltEvent.date_added.asc(), GdeltEvent.global_event_id.asc())
+        .limit(limit)
+    )
+    result = await session.execute(stmt)
+    return result.scalars().all()
+
+
+async def mark_event_enrichment_processing(
+    session: AsyncSession,
+    global_event_id: int,
+) -> bool:
+    """Transition a pending event into processing state."""
+    stmt = (
+        update(GdeltEvent)
+        .where(
+            GdeltEvent.global_event_id == global_event_id,
+            GdeltEvent.enrichment_status == "pending",
+        )
+        .values(enrichment_status="processing", enrichment_error=None)
+    )
+    result = await session.execute(stmt)
+    return (result.rowcount or 0) > 0
+
+
+async def mark_event_enrichment_succeeded(
+    session: AsyncSession,
+    global_event_id: int,
+    *,
+    article_title: str | None,
+    article_summary: str | None,
+    sources: list[str] | None,
+    enriched_at: datetime,
+) -> bool:
+    """Persist a successful enrichment result for a processing event."""
+    stmt = (
+        update(GdeltEvent)
+        .where(
+            GdeltEvent.global_event_id == global_event_id,
+            GdeltEvent.enrichment_status == "processing",
+        )
+        .values(
+            article_title=article_title,
+            article_summary=article_summary,
+            sources=sources,
+            enrichment_status="enriched",
+            enriched_at=enriched_at,
+            enrichment_error=None,
+        )
+    )
+    result = await session.execute(stmt)
+    return (result.rowcount or 0) > 0
+
+
+async def mark_event_enrichment_failed(
+    session: AsyncSession,
+    global_event_id: int,
+    *,
+    error_message: str,
+) -> bool:
+    """Persist a failed enrichment attempt without clearing semantic fields."""
+    stmt = (
+        update(GdeltEvent)
+        .where(
+            GdeltEvent.global_event_id == global_event_id,
+            GdeltEvent.enrichment_status.in_(["pending", "processing"]),
+        )
+        .values(enrichment_status="failed", enrichment_error=error_message)
+    )
+    result = await session.execute(stmt)
+    return (result.rowcount or 0) > 0
 
 
 def _get_insert_chunk_size(session: AsyncSession) -> int:

@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from functools import lru_cache
 
-from pydantic import Field, field_validator
+from pydantic import AnyHttpUrl, Field, TypeAdapter, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -62,6 +62,13 @@ class Settings(BaseSettings):
     retention_days: int = Field(default=30, ge=1, le=365)
     ingestion_interval_minutes: int = Field(default=60, ge=5, le=1440)
     ingestion_batch_size: int = Field(default=10_000, ge=100, le=100_000)
+    enable_event_enrichment: bool = Field(default=False)
+    event_enrichment_interval_minutes: int = Field(default=30, ge=1, le=1440)
+    event_enrichment_batch_size: int = Field(default=100, ge=1, le=10_000)
+    event_enrichment_service_base_url: AnyHttpUrl = Field(
+        default_factory=lambda: TypeAdapter(AnyHttpUrl).validate_python("http://localhost:8001"),
+    )
+    event_enrichment_service_timeout_seconds: float = Field(default=10.0, ge=1.0, le=120.0)
 
     # ── Rate Limiting ─────────────────────────────────────────────────────
     rate_limit_per_minute: int = Field(default=10, ge=1, le=1000)

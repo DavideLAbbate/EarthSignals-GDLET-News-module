@@ -22,6 +22,7 @@ from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.db.session import _get_session_factory
 from app.scheduler.sync_job import run_gdelt_sync
+from app.services.event_enrichment_service import run_event_enrichment_batch
 from app.services.ingestion_service import (
     run_bootstrap,
     run_incremental,
@@ -89,6 +90,7 @@ def add_sync_job(scheduler: AsyncIOScheduler, bq_client) -> None:
         "interval",
         minutes=settings.ingestion_interval_minutes,
         id="gdelt_incremental_ingestion",
+        max_instances=1,
         replace_existing=True,
     )
     logger.info(
@@ -97,12 +99,29 @@ def add_sync_job(scheduler: AsyncIOScheduler, bq_client) -> None:
         interval_minutes=settings.ingestion_interval_minutes,
     )
 
+    if settings.enable_event_enrichment:
+        scheduler.add_job(
+            partial(run_event_enrichment_job, session_factory),
+            "interval",
+            minutes=settings.event_enrichment_interval_minutes,
+            id="gdelt_event_enrichment",
+            max_instances=1,
+            replace_existing=True,
+        )
+        logger.info(
+            "event_enrichment_job_registered",
+            interval_minutes=settings.event_enrichment_interval_minutes,
+        )
+    else:
+        logger.info("event_enrichment_job_skipped", reason="disabled_by_config")
+
     # Retention cleanup - daily
     scheduler.add_job(
         partial(run_retention_job, session_factory),
         "interval",
         hours=24,
         id="gdelt_retention_cleanup",
+        max_instances=1,
         replace_existing=True,
     )
     logger.info("retention_job_registered", interval_hours=24)
@@ -137,11 +156,14 @@ async def run_ingestion_job(
     job_type: str = "incremental",
 ) -> dict[str, Any]:
     """Run an ingestion job (bootstrap or incremental)."""
+    if job_type not in {"bootstrap", "incremental"}:
+        raise ValueError(f"invalid ingestion job_type: {job_type}")
+
     async with session_factory() as session:
         if job_type == "bootstrap":
             return await run_bootstrap(session)
-        else:
-            return await run_incremental(session)
+
+        return await run_incremental(session)
 
 
 async def run_retention_job(
@@ -154,3 +176,16 @@ async def run_retention_job(
 
     async with session_factory() as session:
         return await run_retention_cleanup(session)
+
+
+async def run_event_enrichment_job(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> dict[str, Any]:
+    """Run the scheduled event enrichment batch with a fresh DB session."""
+    settings = get_settings()
+
+    async with session_factory() as session:
+        return await run_event_enrichment_batch(
+            session,
+            batch_size=settings.event_enrichment_batch_size,
+        )
