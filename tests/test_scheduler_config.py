@@ -31,7 +31,7 @@ def test_settings_use_event_enrichment_defaults():
     assert str(settings.event_enrichment_service_base_url) == "http://localhost:8001/"
     assert settings.event_enrichment_service_timeout_seconds == 10.0
     assert settings.enable_cluster_materialisation is True
-    assert settings.cluster_interval_minutes == 60
+    assert settings.cluster_interval_minutes == 1440
 
 
 @pytest.mark.parametrize(
