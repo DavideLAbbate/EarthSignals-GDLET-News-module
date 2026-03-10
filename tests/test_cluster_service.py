@@ -54,8 +54,12 @@ async def test_build_and_materialise_creates_story_cluster(db_session) -> None:
     source_url = "https://example.com/story"
     db_session.add_all(
         [
-            _make_event(101, source_url=source_url, num_mentions=10, num_sources=3, num_articles=4),
-            _make_event(102, source_url=source_url, num_mentions=5, num_sources=2, num_articles=2),
+            _make_event(
+                101, source_url=source_url, num_mentions=500, num_sources=50, num_articles=500
+            ),
+            _make_event(
+                102, source_url=source_url, num_mentions=500, num_sources=50, num_articles=500
+            ),
             GdeltMention(
                 global_event_id=101,
                 mention_time_date=20260310093000,
@@ -106,9 +110,9 @@ async def test_build_and_materialise_creates_story_cluster(db_session) -> None:
     )
     assert cluster.cluster_id == expected_cluster_id
     assert cluster.event_count == 2
-    assert cluster.num_articles == 6
-    assert cluster.num_mentions == 15
-    assert cluster.num_sources == 5
+    assert cluster.num_articles == 1000
+    assert cluster.num_mentions == 1000
+    assert cluster.num_sources == 100
     assert cluster.event_ids == ["101", "102"]
     assert "Combattimento" in (cluster.dominant_event_types or [])
     assert "Conflitto materiale" in (cluster.dominant_quad_classes or [])
@@ -142,3 +146,28 @@ async def test_build_and_materialise_skips_low_scoring_sources(db_session) -> No
 
     result = await db_session.execute(select(StoryCluster))
     assert result.scalars().all() == []
+
+
+async def test_score_source_urls_excludes_candidates_between_0_5_and_4(db_session):
+    """A source URL scoring >= 0.5 but < 4.0 must be excluded after threshold raise."""
+    from app.db.models import GdeltEvent
+
+    # 3 events, 0 articles/mentions/sources → score ≈ 0.55 (above 0.5, below 4.0)
+    for eid in [9000010, 9000011, 9000012]:
+        db_session.add(
+            GdeltEvent(
+                global_event_id=eid,
+                sql_date=20260308,
+                date_added=20260308120000,
+                source_url="https://medium-signal.example.com/article",
+                num_articles=0,
+                num_mentions=0,
+                num_sources=0,
+            )
+        )
+    await db_session.flush()
+
+    svc = ClusterService(db_session)
+    candidates = await svc._score_source_urls(20260308)
+    urls = [c["source_url"] for c in candidates]
+    assert "https://medium-signal.example.com/article" not in urls
