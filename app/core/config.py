@@ -66,7 +66,7 @@ class Settings(BaseSettings):
     event_enrichment_interval_minutes: int = Field(default=30, ge=1, le=1440)
     event_enrichment_batch_size: int = Field(default=100, ge=1, le=10_000)
     enable_cluster_materialisation: bool = Field(default=True)
-    cluster_interval_minutes: int = Field(default=60, ge=1, le=1440)
+    cluster_interval_minutes: int = Field(default=1440, ge=1, le=1440)
     event_enrichment_service_base_url: AnyHttpUrl = Field(
         default_factory=lambda: TypeAdapter(AnyHttpUrl).validate_python("http://localhost:8001"),
     )

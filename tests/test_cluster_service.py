@@ -95,7 +95,7 @@ async def test_build_and_materialise_creates_story_cluster(db_session) -> None:
     await db_session.commit()
 
     service = ClusterService(db_session)
-    count = await service.build_and_materialise(20260301)
+    count = await service.build_and_materialise(datetime(2026, 3, 1, tzinfo=UTC))
     await db_session.commit()
 
     assert count == 1
@@ -139,7 +139,7 @@ async def test_build_and_materialise_skips_low_scoring_sources(db_session) -> No
     await db_session.commit()
 
     service = ClusterService(db_session)
-    count = await service.build_and_materialise(20260301)
+    count = await service.build_and_materialise(datetime(2026, 3, 1, tzinfo=UTC))
     await db_session.commit()
 
     assert count == 0
@@ -184,7 +184,7 @@ async def test_build_and_materialise_merges_clusters_sharing_mention_url(db_sess
     await db_session.flush()
 
     svc = ClusterService(db_session)
-    count = await svc.build_and_materialise(20260308)
+    count = await svc.build_and_materialise(datetime(2026, 3, 8, tzinfo=UTC))
     await db_session.flush()
 
     from sqlalchemy import select

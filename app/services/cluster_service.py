@@ -37,7 +37,7 @@ class ClusterService:
         self._gkg_repo = GkgRepository(session)
         self._cluster_repo = ClusterRepository(session)
 
-    async def _score_source_urls(self, since_sqldate: int) -> list[dict[str, Any]]:
+    async def _score_source_urls(self, since_date_added: int) -> list[dict[str, Any]]:
         """Return candidate source URLs and their aggregated topic scores."""
         stmt = (
             select(
@@ -48,7 +48,7 @@ class ClusterService:
                 func.coalesce(func.sum(GdeltEvent.num_sources), 0).label("num_sources"),
             )
             .where(
-                GdeltEvent.sql_date >= since_sqldate,
+                GdeltEvent.date_added >= since_date_added,
                 GdeltEvent.source_url.is_not(None),
             )
             .group_by(GdeltEvent.source_url)
@@ -81,13 +81,13 @@ class ClusterService:
         candidates.sort(key=lambda item: item["topic_score"], reverse=True)
         return candidates
 
-    async def _collect_events(self, source_url: str, since_sqldate: int) -> list[GdeltEvent]:
+    async def _collect_events(self, source_url: str, since_date_added: int) -> list[GdeltEvent]:
         """Return all recent events for the given source URL."""
         result = await self._session.execute(
             select(GdeltEvent)
             .where(
                 GdeltEvent.source_url == source_url,
-                GdeltEvent.sql_date >= since_sqldate,
+                GdeltEvent.date_added >= since_date_added,
             )
             .order_by(GdeltEvent.date_added.asc(), GdeltEvent.global_event_id.asc())
         )
@@ -182,14 +182,19 @@ class ClusterService:
             "computed_at": datetime.now(UTC),
         }
 
-    async def build_and_materialise(self, since_sqldate: int) -> int:
-        """Build and persist story clusters for candidate source URLs."""
+    async def build_and_materialise(self, since_dt: datetime) -> int:
+        """Build and persist story clusters for candidate source URLs.
+
+        Filters events by ``date_added`` (GDELT YYYYMMDDHHMMSS integer) to honour
+        sub-day precision — e.g. a 36-hour rolling window starting mid-day.
+        """
+        since_date_added = int(since_dt.strftime("%Y%m%d%H%M%S"))
         try:
-            candidates = await self._score_source_urls(since_sqldate)
+            candidates = await self._score_source_urls(since_date_added)
             cluster_rows: list[dict[str, Any]] = []
 
             for candidate in candidates:
-                events = await self._collect_events(candidate["source_url"], since_sqldate)
+                events = await self._collect_events(candidate["source_url"], since_date_added)
                 event_ids = [event.global_event_id for event in events]
                 mentions = await self._collect_mentions(event_ids)
                 mention_identifiers = [
@@ -211,7 +216,7 @@ class ClusterService:
                 return 0
 
             inserted = await self._cluster_repo.bulk_upsert(cluster_rows)
-            logger.info("clusters_materialised", count=inserted, since_sqldate=since_sqldate)
+            logger.info("clusters_materialised", count=inserted, since_date_added=since_date_added)
             return inserted
         except Exception as exc:  # pragma: no cover - covered via raised domain error
             raise ClusterBuildError("Failed to build story clusters", detail=str(exc)) from exc
