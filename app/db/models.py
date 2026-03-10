@@ -1,14 +1,19 @@
 """
 SQLAlchemy ORM models.
 
-SyncState         — persists metadata snapshots derived from the local GDELT event store.
+SyncState          — persists metadata snapshots derived from the local GDELT event store.
 FilterMappingCache — caches Claude's filter normalization output by input hash.
+GdeltEvent         — locally cached GDELT 2.0 event records.
+IngestionState     — tracks ingestion job runs (bootstrap / incremental).
+GdeltMention       — GDELT EVENTMENTIONS rows (documents mentioning an event).
+GdeltGkg           — GDELT GKG rows (semantic metadata per document URL).
+StoryCluster       — materialised story clusters built from the three layers above.
 """
 
 from __future__ import annotations
 
-import uuid
-from datetime import datetime
+import uuid  # used in FilterMappingCache.id default
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import JSON, BigInteger, DateTime, Float, Index, Integer, String, Text
@@ -146,3 +151,100 @@ class IngestionState(Base):
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class GdeltMention(Base):
+    """One GDELT EVENTMENTIONS row — a document that mentions a specific event.
+
+    Surrogate integer PK because EVENTMENTIONS has no single-column natural key.
+    Unique index on (global_event_id, mention_identifier) drives ON CONFLICT DO NOTHING.
+    """
+
+    __tablename__ = "gdelt_mentions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    global_event_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    event_time_date: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    mention_time_date: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    mention_type: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    mention_source_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    mention_identifier: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
+    sent_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    mention_doc_len: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    mention_doc_tone: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    __table_args__ = (
+        Index("ix_gdelt_mentions_event_mention", "global_event_id", "mention_identifier"),
+    )
+
+
+class GdeltGkg(Base):
+    """One GDELT GKG row — semantic metadata for a document URL.
+
+    The GKG layer adds themes, persons, organisations, locations and tone
+    for each document URL, independently of the events that reference it.
+    """
+
+    __tablename__ = "gdelt_gkg"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    gkg_record_id: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
+    date: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    source_common_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    document_identifier: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
+    themes: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    persons: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    organizations: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    locations: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    document_tone: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
+class StoryCluster(Base):
+    """Materialised story cluster — one row per source_url window, enriched with mentions and GKG.
+
+    cluster_id is deterministic: "{YYYYMMDD}_{sha256(source_url)[:12]}".
+    Unique constraint on cluster_id allows ON CONFLICT DO UPDATE (upsert on re-materialisation).
+    """
+
+    __tablename__ = "story_clusters"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    cluster_id: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    source_url: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # ── Scoring ────────────────────────────────────────────────────────────
+    event_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    num_articles: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    num_mentions: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    num_sources: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    topic_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # ── Event layer enrichment ─────────────────────────────────────────────
+    event_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    dominant_event_types: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    dominant_quad_classes: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    avg_severity_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    dominant_countries: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    dominant_locations: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
+    # ── Mentions layer enrichment ──────────────────────────────────────────
+    mention_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    distinct_mention_sources: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    mention_identifiers: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    first_mention_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_mention_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # ── GKG layer enrichment ───────────────────────────────────────────────
+    themes: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    persons: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    organizations: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    gkg_locations: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    document_tone_avg: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+
+    __table_args__ = (Index("ix_story_clusters_topic_score", "topic_score"),)
