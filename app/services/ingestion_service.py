@@ -150,31 +150,32 @@ async def run_incremental(session: AsyncSession) -> dict[str, Any]:
     mentions_repo = MentionsRepository(session)
     gkg_repo = GkgRepository(session)
     try:
-        url, file_ts = await gdelt.fetch_latest_export_url()
+        file_list = await gdelt.fetch_master_export_urls(since_ts=watermark + 1, until_ts=_now_ts())
 
-        if file_ts <= watermark:
-            logger.info("incremental_already_up_to_date", file_ts=file_ts, watermark=watermark)
+        if not file_list:
+            logger.info("incremental_already_up_to_date", watermark=watermark)
         else:
-            rows = await gdelt.download_events(url)
-            if rows:
-                events = [_row_to_event_dict(row) for row in rows]
-                inserted = await event_repository.bulk_insert_events(session, events)
-                await session.commit()
+            for url, file_ts in file_list:
+                rows = await gdelt.download_events(url)
+                if rows:
+                    events = [_row_to_event_dict(row) for row in rows]
+                    inserted = await event_repository.bulk_insert_events(session, events)
+                    await session.commit()
 
-                await _ingest_latest_mentions(gdelt, mentions_repo, session)
-                await _ingest_latest_gkg(gdelt, gkg_repo, session)
+                    await _ingest_mentions_batch(gdelt, mentions_repo, session, file_ts)
+                    await _ingest_gkg_batch(gdelt, gkg_repo, session, file_ts)
 
-                total_ingested += inserted
-                last_watermark = file_ts
-                logger.info(
-                    "incremental_batch_ingested",
-                    url=url,
-                    batch_size=len(events),
-                    inserted=inserted,
-                    watermark=last_watermark,
-                )
-            else:
-                last_watermark = file_ts
+                    total_ingested += inserted
+                    last_watermark = file_ts
+                    logger.info(
+                        "incremental_batch_ingested",
+                        url=url,
+                        batch_size=len(events),
+                        inserted=inserted,
+                        watermark=last_watermark,
+                    )
+                else:
+                    last_watermark = file_ts
 
         await ingestion_repository.update_ingestion_run(
             session,
@@ -281,42 +282,6 @@ def _row_to_gkg_dict(row: dict[str, Any]) -> dict[str, Any]:
         "locations": row.get("V1Locations") or [],
         "document_tone": row.get("AvgTone"),
     }
-
-
-async def _ingest_latest_mentions(
-    gdelt: GdeltHttpClient,
-    mentions_repo: MentionsRepository,
-    session: AsyncSession,
-) -> None:
-    """Best-effort ingest of the latest EVENTMENTIONS file without rolling back events."""
-    try:
-        mentions_url, _ = await gdelt.fetch_latest_mentions_url()
-        mentions_rows = await gdelt.download_mentions(mentions_url)
-        mapped = [_row_to_mention_dict(row) for row in mentions_rows if row]
-        if mapped:
-            await mentions_repo.bulk_upsert(mapped)
-            await session.commit()
-    except Exception as exc:
-        await session.rollback()
-        logger.error("mentions_ingestion_error", error=str(exc))
-
-
-async def _ingest_latest_gkg(
-    gdelt: GdeltHttpClient,
-    gkg_repo: GkgRepository,
-    session: AsyncSession,
-) -> None:
-    """Best-effort ingest of the latest GKG file without rolling back events."""
-    try:
-        gkg_url, _ = await gdelt.fetch_latest_gkg_url()
-        gkg_rows = await gdelt.download_gkg(gkg_url)
-        mapped = [_row_to_gkg_dict(row) for row in gkg_rows if row]
-        if mapped:
-            await gkg_repo.bulk_upsert(mapped)
-            await session.commit()
-    except Exception as exc:
-        await session.rollback()
-        logger.error("gkg_ingestion_error", error=str(exc))
 
 
 async def _ingest_mentions_batch(

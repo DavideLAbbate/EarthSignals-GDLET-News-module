@@ -17,6 +17,8 @@ def mock_gdelt_client():
     """Create a mock GdeltHttpClient."""
     client = MagicMock()
     client.fetch_master_export_urls = AsyncMock(return_value=[])
+    client.fetch_master_mentions_urls = AsyncMock(return_value=[])
+    client.fetch_master_gkg_urls = AsyncMock(return_value=[])
     client.fetch_latest_export_url = AsyncMock(
         return_value=("https://fake/20260308120000.export.CSV.zip", 20260308120000)
     )
@@ -174,7 +176,7 @@ async def test_run_bootstrap_no_files(mock_gdelt_client, db_session):
 
 @pytest.mark.asyncio
 async def test_run_incremental_downloads_new_file(mock_gdelt_client, db_session):
-    """Incremental downloads a file whose timestamp is newer than the watermark."""
+    """Incremental downloads all files newer than the watermark."""
     from app.services import ingestion_service
 
     # Latest file is at 20260308120000; watermark is from bootstrap at 20260301000000
@@ -191,10 +193,18 @@ async def test_run_incremental_downloads_new_file(mock_gdelt_client, db_session)
     )
     await db_session.commit()
 
-    mock_gdelt_client.fetch_latest_export_url = AsyncMock(
-        return_value=("https://fake/20260308120000.export.CSV.zip", 20260308120000)
+    mock_gdelt_client.fetch_master_export_urls = AsyncMock(
+        return_value=[
+            ("https://fake/20260308120000.export.CSV.zip", 20260308120000),
+            ("https://fake/20260308121500.export.CSV.zip", 20260308121500),
+        ]
     )
-    mock_gdelt_client.download_events = AsyncMock(return_value=[_make_gdelt_row()])
+    mock_gdelt_client.download_events = AsyncMock(
+        side_effect=[
+            [_make_gdelt_row(GLOBALEVENTID=1, DATEADDED=20260308120000)],
+            [_make_gdelt_row(GLOBALEVENTID=2, DATEADDED=20260308121500)],
+        ]
+    )
 
     with (
         patch.object(ingestion_service, "_get_gdelt_client", return_value=mock_gdelt_client),
@@ -205,13 +215,14 @@ async def test_run_incremental_downloads_new_file(mock_gdelt_client, db_session)
 
         result = await ingestion_service.run_incremental(db_session)
 
-    assert result["events_ingested"] == 1
-    mock_gdelt_client.download_events.assert_awaited_once()
+    assert result["events_ingested"] == 2
+    assert mock_gdelt_client.download_events.await_count == 2
+    assert result["watermark"] == 20260308121500
 
 
 @pytest.mark.asyncio
 async def test_run_incremental_skips_already_ingested_file(mock_gdelt_client, db_session):
-    """Incremental skips download when the file timestamp is not newer than the watermark."""
+    """Incremental skips download when no files newer than watermark exist."""
     from app.services import ingestion_service
 
     # Watermark (20260308130000) is NEWER than the latest file (20260308120000)
@@ -228,9 +239,7 @@ async def test_run_incremental_skips_already_ingested_file(mock_gdelt_client, db
     )
     await db_session.commit()
 
-    mock_gdelt_client.fetch_latest_export_url = AsyncMock(
-        return_value=("https://fake/20260308120000.export.CSV.zip", 20260308120000)
-    )
+    mock_gdelt_client.fetch_master_export_urls = AsyncMock(return_value=[])
 
     with (
         patch.object(ingestion_service, "_get_gdelt_client", return_value=mock_gdelt_client),
@@ -247,7 +256,7 @@ async def test_run_incremental_skips_already_ingested_file(mock_gdelt_client, db
 
 @pytest.mark.asyncio
 async def test_run_incremental_with_existing_bootstrap_watermark(mock_gdelt_client, db_session):
-    """Incremental uses bootstrap watermark and downloads a newer file."""
+    """Incremental uses bootstrap watermark and downloads missing files after it."""
     from app.services import ingestion_service
 
     bootstrap_run = await ingestion_repository.create_ingestion_run(
@@ -263,11 +272,18 @@ async def test_run_incremental_with_existing_bootstrap_watermark(mock_gdelt_clie
     )
     await db_session.commit()
 
-    # Latest file is newer than the bootstrap watermark
-    mock_gdelt_client.fetch_latest_export_url = AsyncMock(
-        return_value=("https://fake/20990308120000.export.CSV.zip", 20990308120000)
+    mock_gdelt_client.fetch_master_export_urls = AsyncMock(
+        return_value=[
+            ("https://fake/20990308120000.export.CSV.zip", 20990308120000),
+            ("https://fake/20990308121500.export.CSV.zip", 20990308121500),
+        ]
     )
-    mock_gdelt_client.download_events = AsyncMock(return_value=[_make_gdelt_row()])
+    mock_gdelt_client.download_events = AsyncMock(
+        side_effect=[
+            [_make_gdelt_row(GLOBALEVENTID=1, DATEADDED=20990308120000)],
+            [_make_gdelt_row(GLOBALEVENTID=2, DATEADDED=20990308121500)],
+        ]
+    )
 
     with (
         patch.object(ingestion_service, "_get_gdelt_client", return_value=mock_gdelt_client),
@@ -279,12 +295,13 @@ async def test_run_incremental_with_existing_bootstrap_watermark(mock_gdelt_clie
         result = await ingestion_service.run_incremental(db_session)
 
     assert result["status"] == "completed"
-    mock_gdelt_client.download_events.assert_awaited_once()
+    assert mock_gdelt_client.download_events.await_count == 2
+    assert result["watermark"] == 20990308121500
 
 
 @pytest.mark.asyncio
 async def test_run_incremental_ingests_mentions_and_gkg(mock_gdelt_client, db_session):
-    """Incremental ingestion stores events, mentions, and GKG rows when all downloads succeed."""
+    """Incremental ingestion stores events, mentions, and GKG rows for each missing file."""
     from app.services import ingestion_service
 
     bootstrap_run = await ingestion_repository.create_ingestion_run(
@@ -300,18 +317,42 @@ async def test_run_incremental_ingests_mentions_and_gkg(mock_gdelt_client, db_se
     )
     await db_session.commit()
 
-    mock_gdelt_client.fetch_latest_export_url = AsyncMock(
-        return_value=("https://fake/20990308120000.export.CSV.zip", 20990308120000)
+    mock_gdelt_client.fetch_master_export_urls = AsyncMock(
+        return_value=[
+            ("https://fake/20990308120000.export.CSV.zip", 20990308120000),
+            ("https://fake/20990308121500.export.CSV.zip", 20990308121500),
+        ]
     )
-    mock_gdelt_client.fetch_latest_mentions_url = AsyncMock(
-        return_value=("https://fake/20990308120000.mentions.CSV.zip", 20990308120000)
+    mock_gdelt_client.fetch_master_mentions_urls = AsyncMock(
+        side_effect=[
+            [("https://fake/20990308120000.mentions.CSV.zip", 20990308120000)],
+            [("https://fake/20990308121500.mentions.CSV.zip", 20990308121500)],
+        ]
     )
-    mock_gdelt_client.fetch_latest_gkg_url = AsyncMock(
-        return_value=("https://fake/20990308120000.gkg.csv.zip", 20990308120000)
+    mock_gdelt_client.fetch_master_gkg_urls = AsyncMock(
+        side_effect=[
+            [("https://fake/20990308120000.gkg.csv.zip", 20990308120000)],
+            [("https://fake/20990308121500.gkg.csv.zip", 20990308121500)],
+        ]
     )
-    mock_gdelt_client.download_events = AsyncMock(return_value=[_make_gdelt_row()])
-    mock_gdelt_client.download_mentions = AsyncMock(return_value=[_make_mentions_row()])
-    mock_gdelt_client.download_gkg = AsyncMock(return_value=[_make_gkg_row()])
+    mock_gdelt_client.download_events = AsyncMock(
+        side_effect=[
+            [_make_gdelt_row(GLOBALEVENTID=1, DATEADDED=20990308120000)],
+            [_make_gdelt_row(GLOBALEVENTID=2, DATEADDED=20990308121500)],
+        ]
+    )
+    mock_gdelt_client.download_mentions = AsyncMock(
+        side_effect=[
+            [_make_mentions_row(GLOBALEVENTID=1, MentionIdentifier="https://example.com/story-1")],
+            [_make_mentions_row(GLOBALEVENTID=2, MentionIdentifier="https://example.com/story-2")],
+        ]
+    )
+    mock_gdelt_client.download_gkg = AsyncMock(
+        side_effect=[
+            [_make_gkg_row(GKGRECORDID="1", DocumentIdentifier="https://example.com/story-1")],
+            [_make_gkg_row(GKGRECORDID="2", DocumentIdentifier="https://example.com/story-2")],
+        ]
+    )
 
     with (
         patch.object(ingestion_service, "_get_gdelt_client", return_value=mock_gdelt_client),
@@ -322,15 +363,93 @@ async def test_run_incremental_ingests_mentions_and_gkg(mock_gdelt_client, db_se
 
         result = await ingestion_service.run_incremental(db_session)
 
-    assert result["events_ingested"] == 1
+    assert result["events_ingested"] == 2
 
     events_result = await db_session.execute(select(GdeltEvent))
     mentions_result = await db_session.execute(select(GdeltMention))
     gkg_result = await db_session.execute(select(GdeltGkg))
 
-    assert len(events_result.scalars().all()) == 1
+    assert len(events_result.scalars().all()) == 2
+    assert len(mentions_result.scalars().all()) == 2
+    assert len(gkg_result.scalars().all()) == 2
+
+
+@pytest.mark.asyncio
+async def test_run_incremental_keeps_processing_later_files_when_one_mentions_batch_fails(
+    mock_gdelt_client, db_session
+):
+    """A mentions failure for one timestamp should not block later files from being ingested."""
+    from app.services import ingestion_service
+
+    bootstrap_run = await ingestion_repository.create_ingestion_run(
+        db_session,
+        ingestion_repository.IngestionType.BOOTSTRAP,
+    )
+    await ingestion_repository.update_ingestion_run(
+        db_session,
+        bootstrap_run.id,
+        ingestion_repository.IngestionStatus.COMPLETED,
+        watermark_dateadded=20260301000000,
+        events_ingested=0,
+    )
+    await db_session.commit()
+
+    mock_gdelt_client.fetch_master_export_urls = AsyncMock(
+        return_value=[
+            ("https://fake/20990308120000.export.CSV.zip", 20990308120000),
+            ("https://fake/20990308121500.export.CSV.zip", 20990308121500),
+        ]
+    )
+    mock_gdelt_client.fetch_master_mentions_urls = AsyncMock(
+        side_effect=[
+            [("https://fake/20990308120000.mentions.CSV.zip", 20990308120000)],
+            [("https://fake/20990308121500.mentions.CSV.zip", 20990308121500)],
+        ]
+    )
+    mock_gdelt_client.fetch_master_gkg_urls = AsyncMock(
+        side_effect=[
+            [("https://fake/20990308120000.gkg.csv.zip", 20990308120000)],
+            [("https://fake/20990308121500.gkg.csv.zip", 20990308121500)],
+        ]
+    )
+    mock_gdelt_client.download_events = AsyncMock(
+        side_effect=[
+            [_make_gdelt_row(GLOBALEVENTID=1, DATEADDED=20990308120000)],
+            [_make_gdelt_row(GLOBALEVENTID=2, DATEADDED=20990308121500)],
+        ]
+    )
+    mock_gdelt_client.download_mentions = AsyncMock(
+        side_effect=[
+            RuntimeError("mentions failed"),
+            [_make_mentions_row(GLOBALEVENTID=2, MentionIdentifier="https://example.com/story-2")],
+        ]
+    )
+    mock_gdelt_client.download_gkg = AsyncMock(
+        side_effect=[
+            [_make_gkg_row(GKGRECORDID="1", DocumentIdentifier="https://example.com/story-1")],
+            [_make_gkg_row(GKGRECORDID="2", DocumentIdentifier="https://example.com/story-2")],
+        ]
+    )
+
+    with (
+        patch.object(ingestion_service, "_get_gdelt_client", return_value=mock_gdelt_client),
+        patch.object(ingestion_service, "get_settings") as mock_settings,
+    ):
+        mock_settings.return_value.retention_days = 30
+        mock_settings.return_value.ingestion_batch_size = 10000
+
+        result = await ingestion_service.run_incremental(db_session)
+
+    assert result["events_ingested"] == 2
+    assert result["watermark"] == 20990308121500
+
+    events_result = await db_session.execute(select(GdeltEvent))
+    mentions_result = await db_session.execute(select(GdeltMention))
+    gkg_result = await db_session.execute(select(GdeltGkg))
+
+    assert len(events_result.scalars().all()) == 2
     assert len(mentions_result.scalars().all()) == 1
-    assert len(gkg_result.scalars().all()) == 1
+    assert len(gkg_result.scalars().all()) == 2
 
 
 @pytest.mark.asyncio
@@ -351,14 +470,14 @@ async def test_run_incremental_keeps_events_when_mentions_fail(mock_gdelt_client
     )
     await db_session.commit()
 
-    mock_gdelt_client.fetch_latest_export_url = AsyncMock(
-        return_value=("https://fake/20990308120000.export.CSV.zip", 20990308120000)
+    mock_gdelt_client.fetch_master_export_urls = AsyncMock(
+        return_value=[("https://fake/20990308120000.export.CSV.zip", 20990308120000)]
     )
-    mock_gdelt_client.fetch_latest_mentions_url = AsyncMock(
-        return_value=("https://fake/20990308120000.mentions.CSV.zip", 20990308120000)
+    mock_gdelt_client.fetch_master_mentions_urls = AsyncMock(
+        return_value=[("https://fake/20990308120000.mentions.CSV.zip", 20990308120000)]
     )
-    mock_gdelt_client.fetch_latest_gkg_url = AsyncMock(
-        return_value=("https://fake/20990308120000.gkg.csv.zip", 20990308120000)
+    mock_gdelt_client.fetch_master_gkg_urls = AsyncMock(
+        return_value=[("https://fake/20990308120000.gkg.csv.zip", 20990308120000)]
     )
     mock_gdelt_client.download_events = AsyncMock(return_value=[_make_gdelt_row()])
     mock_gdelt_client.download_mentions = AsyncMock(side_effect=RuntimeError("mentions failed"))
@@ -393,8 +512,8 @@ async def test_run_incremental_rolls_back_before_marking_failed(mock_gdelt_clien
     session.commit = AsyncMock()
     session.rollback = AsyncMock()
 
-    mock_gdelt_client.fetch_latest_export_url = AsyncMock(
-        return_value=("https://fake/20990308120000.export.CSV.zip", 20990308120000)
+    mock_gdelt_client.fetch_master_export_urls = AsyncMock(
+        return_value=[("https://fake/20990308120000.export.CSV.zip", 20990308120000)]
     )
     mock_gdelt_client.download_events = AsyncMock(return_value=[_make_gdelt_row()])
 
