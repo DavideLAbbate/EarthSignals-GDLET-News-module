@@ -135,3 +135,23 @@ def test_merged_cluster_unions_themes():
     merger = ClusterMerger(mention_overlap_min=1, jaccard_threshold=0.3)
     result = merger.merge([c1, c2])
     assert set(result[0]["themes"]) == {"IRAN", "WAR", "OIL"}
+
+
+def test_merge_respects_mention_overlap_min():
+    """Two clusters sharing exactly 1 URL must NOT be fused when min is 2."""
+    c1 = _make_cluster("c1", ["https://shared.com/x"], ["IRAN"], topic_score=5.0)
+    c2 = _make_cluster("c2", ["https://shared.com/x"], ["IRAN"], topic_score=4.0)
+    merger = ClusterMerger(
+        mention_overlap_min=2, jaccard_threshold=1.0
+    )  # threshold=1.0 disables Jaccard
+    result = merger.merge([c1, c2])
+    assert len(result) == 2
+
+
+def test_merge_single_cluster_sets_computed_at():
+    """merge([c]) must return a cluster with computed_at set to a UTC datetime."""
+    c1 = _make_cluster("c1", [], ["IRAN"])
+    merger = ClusterMerger(mention_overlap_min=1, jaccard_threshold=0.3)
+    result = merger.merge([c1])
+    assert result[0]["computed_at"] is not None
+    assert result[0]["computed_at"].tzinfo is not None  # timezone-aware

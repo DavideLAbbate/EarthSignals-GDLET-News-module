@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import UTC, datetime
 from statistics import mean
 from typing import Any
@@ -89,8 +89,6 @@ class ClusterMerger:
         """
         if not clusters:
             return []
-        if len(clusters) == 1:
-            return [clusters[0]]
 
         uf = _UnionFind(len(clusters))
         self._union_by_mention_overlap(clusters, uf)
@@ -102,20 +100,22 @@ class ClusterMerger:
     # ── graph construction ───────────────────────────────────────────────────
 
     def _union_by_mention_overlap(self, clusters: list[dict[str, Any]], uf: _UnionFind) -> None:
-        """Union any two clusters that share >= mention_overlap_min mention URL."""
-        # Build an inverted index: mention_url → list of cluster indices
-        url_to_indices: dict[str, list[int]] = {}
-        for idx, cluster in enumerate(clusters):
-            for url in cluster.get("mention_identifiers") or []:
-                url_to_indices.setdefault(url, []).append(idx)
+        """Union pairs of clusters whose shared mention URL count >= mention_overlap_min."""
+        url_to_indices: dict[str, list[int]] = defaultdict(list)
+        for i, cluster in enumerate(clusters):
+            for mid in cluster.get("mention_identifiers") or []:
+                url_to_indices[mid].append(i)
 
+        pair_overlap: defaultdict[tuple[int, int], int] = defaultdict(int)
         for indices in url_to_indices.values():
-            if len(indices) < 2:
-                continue
-            # All indices sharing this URL form one connected group
-            root = indices[0]
-            for other in indices[1:]:
-                uf.union(root, other)
+            for a in range(len(indices)):
+                for b in range(a + 1, len(indices)):
+                    key = (min(indices[a], indices[b]), max(indices[a], indices[b]))
+                    pair_overlap[key] += 1
+
+        for (i, j), count in pair_overlap.items():
+            if count >= self._mention_overlap_min:
+                uf.union(i, j)
 
     def _union_by_theme_jaccard(self, clusters: list[dict[str, Any]], uf: _UnionFind) -> None:
         """Union pairs not yet connected whose theme Jaccard >= jaccard_threshold."""
@@ -126,7 +126,7 @@ class ClusterMerger:
             for j in range(i + 1, n):
                 if uf.find(i) == uf.find(j):
                     continue  # already merged — skip expensive Jaccard check
-                if _jaccard(theme_sets[i], theme_sets[j]) >= self._jaccard_threshold:
+                if _jaccard(theme_sets[i], theme_sets[j]) > self._jaccard_threshold:
                     uf.union(i, j)
 
     # ── component extraction ─────────────────────────────────────────────────
