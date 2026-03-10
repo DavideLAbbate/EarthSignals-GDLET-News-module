@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.db.session import _get_session_factory
+from app.scheduler.cluster_job import run_cluster_job
 from app.scheduler.sync_job import run_gdelt_sync
 from app.services.event_enrichment_service import run_event_enrichment_batch
 from app.services.ingestion_service import (
@@ -114,6 +115,22 @@ def add_sync_job(scheduler: AsyncIOScheduler, bq_client) -> None:
         )
     else:
         logger.info("event_enrichment_job_skipped", reason="disabled_by_config")
+
+    if settings.enable_cluster_materialisation:
+        scheduler.add_job(
+            partial(run_cluster_job, session_factory),
+            "interval",
+            minutes=settings.cluster_interval_minutes,
+            id="gdelt_cluster_materialisation",
+            max_instances=1,
+            replace_existing=True,
+        )
+        logger.info(
+            "cluster_materialisation_job_registered",
+            interval_minutes=settings.cluster_interval_minutes,
+        )
+    else:
+        logger.info("cluster_materialisation_job_skipped", reason="disabled_by_config")
 
     # Retention cleanup - daily
     scheduler.add_job(

@@ -30,6 +30,8 @@ def test_settings_use_event_enrichment_defaults():
     assert settings.event_enrichment_batch_size == 100
     assert str(settings.event_enrichment_service_base_url) == "http://localhost:8001/"
     assert settings.event_enrichment_service_timeout_seconds == 10.0
+    assert settings.enable_cluster_materialisation is True
+    assert settings.cluster_interval_minutes == 60
 
 
 @pytest.mark.parametrize(
@@ -65,6 +67,20 @@ def test_settings_accept_explicit_event_enrichment_overrides():
     assert settings.event_enrichment_batch_size == 250
     assert str(settings.event_enrichment_service_base_url) == "https://enrichment.internal:8443/"
     assert settings.event_enrichment_service_timeout_seconds == 22.5
+
+
+def test_settings_accept_explicit_cluster_materialisation_overrides():
+    """Cluster materialisation settings should be configurable."""
+    settings = Settings.model_validate(
+        {
+            **_base_settings_overrides(),
+            "enable_cluster_materialisation": False,
+            "cluster_interval_minutes": 120,
+        }
+    )
+
+    assert settings.enable_cluster_materialisation is False
+    assert settings.cluster_interval_minutes == 120
 
 
 def test_add_sync_job_skips_metadata_sync_when_disabled():
@@ -150,3 +166,56 @@ def test_add_sync_job_skips_event_enrichment_when_disabled():
 
     job_ids = [call.kwargs.get("id") for call in mock_scheduler.add_job.call_args_list]
     assert "gdelt_event_enrichment" not in job_ids
+
+
+def test_add_sync_job_registers_cluster_materialisation_when_enabled():
+    """Enabling cluster materialisation should register the cluster job."""
+    from app.scheduler import scheduler
+
+    mock_scheduler = MagicMock()
+
+    with (
+        patch.object(scheduler, "get_settings") as mock_settings,
+        patch.object(scheduler, "_get_session_factory", return_value=MagicMock()),
+    ):
+        mock_settings.return_value.enable_metadata_sync = True
+        mock_settings.return_value.sync_interval_minutes = 15
+        mock_settings.return_value.ingestion_interval_minutes = 60
+        mock_settings.return_value.enable_event_enrichment = False
+        mock_settings.return_value.enable_cluster_materialisation = True
+        mock_settings.return_value.cluster_interval_minutes = 90
+
+        scheduler.add_sync_job(mock_scheduler, MagicMock())
+
+    cluster_calls = [
+        call
+        for call in mock_scheduler.add_job.call_args_list
+        if call.kwargs.get("id") == "gdelt_cluster_materialisation"
+    ]
+    assert len(cluster_calls) == 1
+    assert cluster_calls[0].kwargs["minutes"] == 90
+    assert cluster_calls[0].kwargs["max_instances"] == 1
+    assert cluster_calls[0].kwargs["replace_existing"] is True
+
+
+def test_add_sync_job_skips_cluster_materialisation_when_disabled():
+    """Disabling cluster materialisation should avoid registering the cluster job."""
+    from app.scheduler import scheduler
+
+    mock_scheduler = MagicMock()
+
+    with (
+        patch.object(scheduler, "get_settings") as mock_settings,
+        patch.object(scheduler, "_get_session_factory", return_value=MagicMock()),
+    ):
+        mock_settings.return_value.enable_metadata_sync = True
+        mock_settings.return_value.sync_interval_minutes = 15
+        mock_settings.return_value.ingestion_interval_minutes = 60
+        mock_settings.return_value.enable_event_enrichment = False
+        mock_settings.return_value.enable_cluster_materialisation = False
+        mock_settings.return_value.cluster_interval_minutes = 60
+
+        scheduler.add_sync_job(mock_scheduler, MagicMock())
+
+    job_ids = [call.kwargs.get("id") for call in mock_scheduler.add_job.call_args_list]
+    assert "gdelt_cluster_materialisation" not in job_ids

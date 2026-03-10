@@ -15,6 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.db.repositories import event_repository, ingestion_repository
+from app.db.repositories.gkg_repository import GkgRepository
+from app.db.repositories.mentions_repository import MentionsRepository
 from app.integrations.gdelt_http_client import GdeltHttpClient
 
 logger = get_logger(__name__)
@@ -56,6 +58,8 @@ async def run_bootstrap(session: AsyncSession) -> dict[str, Any]:
     last_watermark = until_ts
 
     gdelt = _get_gdelt_client()
+    mentions_repo = MentionsRepository(session)
+    gkg_repo = GkgRepository(session)
     try:
         file_list = await gdelt.fetch_master_export_urls(since_ts=since_ts, until_ts=until_ts)
 
@@ -68,6 +72,9 @@ async def run_bootstrap(session: AsyncSession) -> dict[str, Any]:
             events = [_row_to_event_dict(row) for row in rows]
             inserted = await event_repository.bulk_insert_events(session, events)
             await session.commit()
+
+            await _ingest_mentions_batch(gdelt, mentions_repo, session, file_ts)
+            await _ingest_gkg_batch(gdelt, gkg_repo, session, file_ts)
 
             total_ingested += inserted
             last_watermark = file_ts
@@ -140,6 +147,8 @@ async def run_incremental(session: AsyncSession) -> dict[str, Any]:
     last_watermark = watermark
 
     gdelt = _get_gdelt_client()
+    mentions_repo = MentionsRepository(session)
+    gkg_repo = GkgRepository(session)
     try:
         url, file_ts = await gdelt.fetch_latest_export_url()
 
@@ -151,6 +160,10 @@ async def run_incremental(session: AsyncSession) -> dict[str, Any]:
                 events = [_row_to_event_dict(row) for row in rows]
                 inserted = await event_repository.bulk_insert_events(session, events)
                 await session.commit()
+
+                await _ingest_latest_mentions(gdelt, mentions_repo, session)
+                await _ingest_latest_gkg(gdelt, gkg_repo, session)
+
                 total_ingested += inserted
                 last_watermark = file_ts
                 logger.info(
@@ -239,3 +252,108 @@ def _row_to_event_dict(row: dict[str, Any]) -> dict[str, Any]:
         "action_geo_country_code": row.get("ActionGeo_CountryCode"),
         "source_url": row.get("SOURCEURL"),
     }
+
+
+def _row_to_mention_dict(row: dict[str, Any]) -> dict[str, Any]:
+    """Transform an EVENTMENTIONS row dict to a DB mention dict."""
+    return {
+        "global_event_id": row.get("GLOBALEVENTID"),
+        "event_time_date": row.get("EventTimeDate"),
+        "mention_time_date": row.get("MentionTimeDate"),
+        "mention_type": row.get("MentionType"),
+        "mention_source_name": row.get("MentionSourceName"),
+        "mention_identifier": row.get("MentionIdentifier"),
+        "mention_doc_len": row.get("MentionDocLen"),
+        "mention_doc_tone": row.get("MentionDocTone"),
+    }
+
+
+def _row_to_gkg_dict(row: dict[str, Any]) -> dict[str, Any]:
+    """Transform a GKG row dict to a DB GKG dict."""
+    return {
+        "gkg_record_id": row.get("GKGRECORDID"),
+        "date": row.get("DATE"),
+        "source_common_name": row.get("SourceCommonName"),
+        "document_identifier": row.get("DocumentIdentifier"),
+        "themes": row.get("V1Themes") or [],
+        "persons": row.get("V1Persons") or [],
+        "organizations": row.get("V1Organizations") or [],
+        "locations": row.get("V1Locations") or [],
+        "document_tone": row.get("AvgTone"),
+    }
+
+
+async def _ingest_latest_mentions(
+    gdelt: GdeltHttpClient,
+    mentions_repo: MentionsRepository,
+    session: AsyncSession,
+) -> None:
+    """Best-effort ingest of the latest EVENTMENTIONS file without rolling back events."""
+    try:
+        mentions_url, _ = await gdelt.fetch_latest_mentions_url()
+        mentions_rows = await gdelt.download_mentions(mentions_url)
+        mapped = [_row_to_mention_dict(row) for row in mentions_rows if row]
+        if mapped:
+            await mentions_repo.bulk_upsert(mapped)
+            await session.commit()
+    except Exception as exc:
+        await session.rollback()
+        logger.error("mentions_ingestion_error", error=str(exc))
+
+
+async def _ingest_latest_gkg(
+    gdelt: GdeltHttpClient,
+    gkg_repo: GkgRepository,
+    session: AsyncSession,
+) -> None:
+    """Best-effort ingest of the latest GKG file without rolling back events."""
+    try:
+        gkg_url, _ = await gdelt.fetch_latest_gkg_url()
+        gkg_rows = await gdelt.download_gkg(gkg_url)
+        mapped = [_row_to_gkg_dict(row) for row in gkg_rows if row]
+        if mapped:
+            await gkg_repo.bulk_upsert(mapped)
+            await session.commit()
+    except Exception as exc:
+        await session.rollback()
+        logger.error("gkg_ingestion_error", error=str(exc))
+
+
+async def _ingest_mentions_batch(
+    gdelt: GdeltHttpClient,
+    mentions_repo: MentionsRepository,
+    session: AsyncSession,
+    file_ts: int,
+) -> None:
+    """Best-effort ingest of the batch-aligned EVENTMENTIONS file during bootstrap."""
+    try:
+        mentions_files = await gdelt.fetch_master_mentions_urls(since_ts=file_ts, until_ts=file_ts)
+        for mentions_url, _ in mentions_files:
+            mentions_rows = await gdelt.download_mentions(mentions_url)
+            mapped = [_row_to_mention_dict(row) for row in mentions_rows if row]
+            if mapped:
+                await mentions_repo.bulk_upsert(mapped)
+                await session.commit()
+    except Exception as exc:
+        await session.rollback()
+        logger.error("mentions_ingestion_error", error=str(exc), file_ts=file_ts)
+
+
+async def _ingest_gkg_batch(
+    gdelt: GdeltHttpClient,
+    gkg_repo: GkgRepository,
+    session: AsyncSession,
+    file_ts: int,
+) -> None:
+    """Best-effort ingest of the batch-aligned GKG file during bootstrap."""
+    try:
+        gkg_files = await gdelt.fetch_master_gkg_urls(since_ts=file_ts, until_ts=file_ts)
+        for gkg_url, _ in gkg_files:
+            gkg_rows = await gdelt.download_gkg(gkg_url)
+            mapped = [_row_to_gkg_dict(row) for row in gkg_rows if row]
+            if mapped:
+                await gkg_repo.bulk_upsert(mapped)
+                await session.commit()
+    except Exception as exc:
+        await session.rollback()
+        logger.error("gkg_ingestion_error", error=str(exc), file_ts=file_ts)

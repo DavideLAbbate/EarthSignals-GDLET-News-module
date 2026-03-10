@@ -75,26 +75,27 @@ class ClusterRepository:
         q = select(StoryCluster)
         if min_score is not None:
             q = q.where(StoryCluster.topic_score >= min_score)
-        if country_code is not None:
-            # JSON array containment: dominant_countries contains the given code.
-            # Use JSON_CONTAINS (MySQL/SQLite) or @> (PG) via cast — simplest cross-dialect:
-            # filter in Python after fetch (acceptable for small result sets).
-            pass  # Applied post-fetch below when country_code is set
 
-        count_q = select(func.count()).select_from(q.with_only_columns(StoryCluster.id).subquery())
-        total_result = await self._session.execute(count_q)
-        total = total_result.scalar_one()
+        if country_code is None:
+            count_q = select(func.count()).select_from(
+                q.with_only_columns(StoryCluster.id).subquery()
+            )
+            total_result = await self._session.execute(count_q)
+            total = total_result.scalar_one()
 
-        q = q.order_by(StoryCluster.topic_score.desc()).offset(offset).limit(limit)
-        result = await self._session.execute(q)
-        clusters = list(result.scalars().all())
+            q = q.order_by(StoryCluster.topic_score.desc()).offset(offset).limit(limit)
+            result = await self._session.execute(q)
+            clusters = list(result.scalars().all())
+            return clusters, total
 
-        if country_code is not None:
-            clusters = [
-                c for c in clusters if c.dominant_countries and country_code in c.dominant_countries
-            ]
-
-        return clusters, total
+        result = await self._session.execute(q.order_by(StoryCluster.topic_score.desc()))
+        filtered_clusters = [
+            cluster
+            for cluster in result.scalars().all()
+            if cluster.dominant_countries and country_code in cluster.dominant_countries
+        ]
+        total = len(filtered_clusters)
+        return filtered_clusters[offset : offset + limit], total
 
     async def delete_computed_before(self, cutoff_ts: datetime) -> int:
         """Delete clusters computed before cutoff_ts. Returns deleted count."""

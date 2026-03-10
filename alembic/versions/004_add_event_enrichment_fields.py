@@ -31,7 +31,8 @@ def upgrade() -> None:
         "gdelt_events", sa.Column("enriched_at", sa.DateTime(timezone=True), nullable=True)
     )
     op.add_column("gdelt_events", sa.Column("enrichment_error", sa.Text(), nullable=True))
-    op.alter_column("gdelt_events", "enrichment_status", server_default=None)
+    with op.batch_alter_table("gdelt_events") as batch_op:
+        batch_op.alter_column("enrichment_status", server_default=None)
 
 
 def downgrade() -> None:

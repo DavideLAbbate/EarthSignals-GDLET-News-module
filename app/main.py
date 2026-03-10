@@ -30,7 +30,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from app.api.error_handlers import register_error_handlers
-from app.api.routes import events, filters, health, interpret, sync
+from app.api.routes import clusters, events, filters, health, interpret, sync
 from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
 from app.db.session import dispose_engine
@@ -191,6 +191,7 @@ def create_app() -> FastAPI:
 
     # ── Routes ─────────────────────────────────────────────────────────────
     app.include_router(health.router)
+    app.include_router(clusters.router)
     app.include_router(events.router)
     app.include_router(filters.router)
     app.include_router(sync.router)

@@ -6,7 +6,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from sqlalchemy import select
 
+from app.db.models import GdeltEvent, GdeltGkg, GdeltMention
 from app.db.repositories import ingestion_repository
 
 
@@ -47,6 +49,37 @@ def _make_gdelt_row(**overrides) -> dict:
     return base
 
 
+def _make_mentions_row(**overrides) -> dict:
+    base = {
+        "GLOBALEVENTID": 1234567890123,
+        "EventTimeDate": 20260301000000,
+        "MentionTimeDate": 20260301010000,
+        "MentionType": 1,
+        "MentionSourceName": "example.com",
+        "MentionIdentifier": "https://example.com/story",
+        "MentionDocLen": 1200,
+        "MentionDocTone": -1.5,
+    }
+    base.update(overrides)
+    return base
+
+
+def _make_gkg_row(**overrides) -> dict:
+    base = {
+        "GKGRECORDID": "20260301000000-1",
+        "DATE": 20260301000000,
+        "SourceCommonName": "example.com",
+        "DocumentIdentifier": "https://example.com/story",
+        "V1Themes": ["IRAN", "CONFLICT"],
+        "V1Persons": ["Person A"],
+        "V1Organizations": ["Org A"],
+        "V1Locations": ["Tehran, Tehran, Iran"],
+        "AvgTone": -3.2,
+    }
+    base.update(overrides)
+    return base
+
+
 @pytest.mark.asyncio
 async def test_row_to_event_dict():
     """Test transformation of GDELT row dict to event dict."""
@@ -60,6 +93,34 @@ async def test_row_to_event_dict():
     assert result["date_added"] == 20260301000000
     assert result["actor1_country_code"] == "USA"
     assert result["event_code"] == "042"
+
+
+@pytest.mark.asyncio
+async def test_row_to_mention_dict():
+    """Test transformation of EVENTMENTIONS row dict to mention dict."""
+    from app.services.ingestion_service import _row_to_mention_dict
+
+    row = _make_mentions_row()
+    result = _row_to_mention_dict(row)
+
+    assert result["global_event_id"] == 1234567890123
+    assert result["mention_identifier"] == "https://example.com/story"
+    assert result["mention_source_name"] == "example.com"
+    assert result["mention_doc_tone"] == -1.5
+
+
+@pytest.mark.asyncio
+async def test_row_to_gkg_dict():
+    """Test transformation of GKG row dict to gkg dict."""
+    from app.services.ingestion_service import _row_to_gkg_dict
+
+    row = _make_gkg_row()
+    result = _row_to_gkg_dict(row)
+
+    assert result["gkg_record_id"] == "20260301000000-1"
+    assert result["document_identifier"] == "https://example.com/story"
+    assert result["themes"] == ["IRAN", "CONFLICT"]
+    assert result["document_tone"] == -3.2
 
 
 @pytest.mark.asyncio
@@ -219,6 +280,108 @@ async def test_run_incremental_with_existing_bootstrap_watermark(mock_gdelt_clie
 
     assert result["status"] == "completed"
     mock_gdelt_client.download_events.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_run_incremental_ingests_mentions_and_gkg(mock_gdelt_client, db_session):
+    """Incremental ingestion stores events, mentions, and GKG rows when all downloads succeed."""
+    from app.services import ingestion_service
+
+    bootstrap_run = await ingestion_repository.create_ingestion_run(
+        db_session,
+        ingestion_repository.IngestionType.BOOTSTRAP,
+    )
+    await ingestion_repository.update_ingestion_run(
+        db_session,
+        bootstrap_run.id,
+        ingestion_repository.IngestionStatus.COMPLETED,
+        watermark_dateadded=20260301000000,
+        events_ingested=0,
+    )
+    await db_session.commit()
+
+    mock_gdelt_client.fetch_latest_export_url = AsyncMock(
+        return_value=("https://fake/20990308120000.export.CSV.zip", 20990308120000)
+    )
+    mock_gdelt_client.fetch_latest_mentions_url = AsyncMock(
+        return_value=("https://fake/20990308120000.mentions.CSV.zip", 20990308120000)
+    )
+    mock_gdelt_client.fetch_latest_gkg_url = AsyncMock(
+        return_value=("https://fake/20990308120000.gkg.csv.zip", 20990308120000)
+    )
+    mock_gdelt_client.download_events = AsyncMock(return_value=[_make_gdelt_row()])
+    mock_gdelt_client.download_mentions = AsyncMock(return_value=[_make_mentions_row()])
+    mock_gdelt_client.download_gkg = AsyncMock(return_value=[_make_gkg_row()])
+
+    with (
+        patch.object(ingestion_service, "_get_gdelt_client", return_value=mock_gdelt_client),
+        patch.object(ingestion_service, "get_settings") as mock_settings,
+    ):
+        mock_settings.return_value.retention_days = 30
+        mock_settings.return_value.ingestion_batch_size = 10000
+
+        result = await ingestion_service.run_incremental(db_session)
+
+    assert result["events_ingested"] == 1
+
+    events_result = await db_session.execute(select(GdeltEvent))
+    mentions_result = await db_session.execute(select(GdeltMention))
+    gkg_result = await db_session.execute(select(GdeltGkg))
+
+    assert len(events_result.scalars().all()) == 1
+    assert len(mentions_result.scalars().all()) == 1
+    assert len(gkg_result.scalars().all()) == 1
+
+
+@pytest.mark.asyncio
+async def test_run_incremental_keeps_events_when_mentions_fail(mock_gdelt_client, db_session):
+    """Mentions download failure should not roll back already committed events or GKG."""
+    from app.services import ingestion_service
+
+    bootstrap_run = await ingestion_repository.create_ingestion_run(
+        db_session,
+        ingestion_repository.IngestionType.BOOTSTRAP,
+    )
+    await ingestion_repository.update_ingestion_run(
+        db_session,
+        bootstrap_run.id,
+        ingestion_repository.IngestionStatus.COMPLETED,
+        watermark_dateadded=20260301000000,
+        events_ingested=0,
+    )
+    await db_session.commit()
+
+    mock_gdelt_client.fetch_latest_export_url = AsyncMock(
+        return_value=("https://fake/20990308120000.export.CSV.zip", 20990308120000)
+    )
+    mock_gdelt_client.fetch_latest_mentions_url = AsyncMock(
+        return_value=("https://fake/20990308120000.mentions.CSV.zip", 20990308120000)
+    )
+    mock_gdelt_client.fetch_latest_gkg_url = AsyncMock(
+        return_value=("https://fake/20990308120000.gkg.csv.zip", 20990308120000)
+    )
+    mock_gdelt_client.download_events = AsyncMock(return_value=[_make_gdelt_row()])
+    mock_gdelt_client.download_mentions = AsyncMock(side_effect=RuntimeError("mentions failed"))
+    mock_gdelt_client.download_gkg = AsyncMock(return_value=[_make_gkg_row()])
+
+    with (
+        patch.object(ingestion_service, "_get_gdelt_client", return_value=mock_gdelt_client),
+        patch.object(ingestion_service, "get_settings") as mock_settings,
+    ):
+        mock_settings.return_value.retention_days = 30
+        mock_settings.return_value.ingestion_batch_size = 10000
+
+        result = await ingestion_service.run_incremental(db_session)
+
+    assert result["events_ingested"] == 1
+
+    events_result = await db_session.execute(select(GdeltEvent))
+    mentions_result = await db_session.execute(select(GdeltMention))
+    gkg_result = await db_session.execute(select(GdeltGkg))
+
+    assert len(events_result.scalars().all()) == 1
+    assert len(mentions_result.scalars().all()) == 0
+    assert len(gkg_result.scalars().all()) == 1
 
 
 @pytest.mark.asyncio

@@ -18,13 +18,13 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.alter_column(
-        "gdelt_events",
-        "sources",
-        existing_type=sa.JSON(),
-        existing_nullable=True,
-        new_column_name="cited_sources",
-    )
+    with op.batch_alter_table("gdelt_events") as batch_op:
+        batch_op.alter_column(
+            "sources",
+            existing_type=sa.JSON(),
+            existing_nullable=True,
+            new_column_name="cited_sources",
+        )
     op.add_column("gdelt_events", sa.Column("main_topics", sa.JSON(), nullable=True))
     op.add_column("gdelt_events", sa.Column("keywords", sa.JSON(), nullable=True))
     op.add_column("gdelt_events", sa.Column("entities", sa.JSON(), nullable=True))
@@ -34,10 +34,10 @@ def downgrade() -> None:
     op.drop_column("gdelt_events", "entities")
     op.drop_column("gdelt_events", "keywords")
     op.drop_column("gdelt_events", "main_topics")
-    op.alter_column(
-        "gdelt_events",
-        "cited_sources",
-        existing_type=sa.JSON(),
-        existing_nullable=True,
-        new_column_name="sources",
-    )
+    with op.batch_alter_table("gdelt_events") as batch_op:
+        batch_op.alter_column(
+            "cited_sources",
+            existing_type=sa.JSON(),
+            existing_nullable=True,
+            new_column_name="sources",
+        )
