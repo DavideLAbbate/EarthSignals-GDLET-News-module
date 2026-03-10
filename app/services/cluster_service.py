@@ -23,6 +23,7 @@ from app.integrations.event_enrichment_mapper import (
     get_event_root_code_label,
     get_quad_class_label,
 )
+from app.services.cluster_merger import ClusterMerger
 
 logger = get_logger(__name__)
 
@@ -201,6 +202,10 @@ class ClusterService:
                 ]
                 gkg_rows = await self._collect_gkg(mention_identifiers)
                 cluster_rows.append(self._build_cluster(candidate, events, mentions, gkg_rows))
+
+            # ── Merge semantically related clusters ──────────────────────────────
+            merger = ClusterMerger(mention_overlap_min=1, jaccard_threshold=0.3)
+            cluster_rows = merger.merge(cluster_rows)
 
             if not cluster_rows:
                 return 0

@@ -148,6 +148,56 @@ async def test_build_and_materialise_skips_low_scoring_sources(db_session) -> No
     assert result.scalars().all() == []
 
 
+async def test_build_and_materialise_merges_clusters_sharing_mention_url(db_session):
+    """Two source URLs sharing a mention URL must produce one cluster in DB, not two."""
+    from app.db.models import GdeltEvent, GdeltMention
+
+    shared_mention = "https://shared-news.example.com/iran-story"
+
+    # Two source URLs each with enough signal to score >= 4.0
+    # 10 events each with num_articles=500, num_mentions=500, num_sources=50
+    # score = ln(11)*0.4 + ln(5001)*0.3 + ln(5001)*0.2 + ln(501)*0.1 ≈ 6.0
+    for source_url, base_eid in [
+        ("https://source-a.example.com/article", 8000000),
+        ("https://source-b.example.com/article", 8001000),
+    ]:
+        for i in range(10):
+            eid = base_eid + i
+            db_session.add(
+                GdeltEvent(
+                    global_event_id=eid,
+                    sql_date=20260308,
+                    date_added=20260308120000,
+                    source_url=source_url,
+                    num_articles=500,
+                    num_mentions=500,
+                    num_sources=50,
+                )
+            )
+            db_session.add(
+                GdeltMention(
+                    global_event_id=eid,
+                    mention_identifier=shared_mention,
+                    mention_source_name="shared-news.example.com",
+                )
+            )
+    await db_session.flush()
+
+    svc = ClusterService(db_session)
+    count = await svc.build_and_materialise(20260308)
+    await db_session.flush()
+
+    from sqlalchemy import select
+    from app.db.models import StoryCluster
+
+    result = await db_session.execute(select(StoryCluster))
+    clusters = result.scalars().all()
+    assert count == 1
+    assert len(clusters) == 1
+    # Fused cluster must contain event_ids from both source URLs (20 total)
+    assert len(clusters[0].event_ids) == 20
+
+
 async def test_score_source_urls_excludes_candidates_between_0_5_and_4(db_session):
     """A source URL scoring >= 0.5 but < 4.0 must be excluded after threshold raise."""
     from app.db.models import GdeltEvent
