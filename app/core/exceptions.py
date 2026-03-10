@@ -93,3 +93,17 @@ class ArticleProcessingError(GDELTBackendError):
     def __init__(self, message: str) -> None:
         super().__init__(message)
         self.message = message
+
+
+class ClusterError(GDELTBackendError):
+    """General cluster pipeline error.
+
+    Maps to HTTP 500 Internal Server Error.
+    """
+
+
+class ClusterBuildError(ClusterError):
+    """Raised when the cluster materialisation job fails.
+
+    Maps to HTTP 503 Service Unavailable.
+    """

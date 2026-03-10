@@ -14,6 +14,8 @@ from app.api.error_handlers import register_error_handlers
 from app.core.exceptions import (
     AnthropicUnavailableError,
     BigQueryError,
+    ClusterBuildError,
+    ClusterError,
     FilterInterpretationError,
     QueryValidationError,
     SyncError,
@@ -74,6 +76,22 @@ def test_sync_error_returns_500():
     assert response.json()["error"] == "sync_error"
 
 
+def test_cluster_build_error_returns_503():
+    app = _make_test_app_with_route(ClusterBuildError("Cluster job unavailable"))
+    client = TestClient(app, raise_server_exceptions=False)
+    response = client.get("/test")
+    assert response.status_code == 503
+    assert response.json()["error"] == "cluster_build_error"
+
+
+def test_cluster_error_returns_500():
+    app = _make_test_app_with_route(ClusterError("Cluster build failed"))
+    client = TestClient(app, raise_server_exceptions=False)
+    response = client.get("/test")
+    assert response.status_code == 500
+    assert response.json()["error"] == "cluster_error"
+
+
 def test_unhandled_exception_returns_500():
     app = _make_test_app_with_route(ValueError("Something totally unexpected"))
     client = TestClient(app, raise_server_exceptions=False)
@@ -90,6 +108,8 @@ def test_error_response_always_json():
         BigQueryError("x"),
         AnthropicUnavailableError("x"),
         SyncError("x"),
+        ClusterBuildError("x"),
+        ClusterError("x"),
     ]
     for exc in exceptions:
         app = _make_test_app_with_route(exc)

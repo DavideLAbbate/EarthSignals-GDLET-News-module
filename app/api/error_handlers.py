@@ -13,13 +13,15 @@ from fastapi.responses import JSONResponse
 from app.core.exceptions import (
     AnthropicUnavailableError,
     BigQueryError,
+    ClusterBuildError,
+    ClusterError,
     FilterInterpretationError,
     GDELTBackendError,
-    QueryValidationError,
-    SyncError,
     IngestionError,
-    RetentionError,
     LocalQueryError,
+    QueryValidationError,
+    RetentionError,
+    SyncError,
 )
 
 
@@ -123,6 +125,32 @@ def register_error_handlers(app: FastAPI) -> None:
         return _error_response(
             502,
             "local_query_error",
+            exc.message,
+            exc.detail,
+        )
+
+    @app.exception_handler(ClusterBuildError)
+    async def cluster_build_error_handler(
+        request: Request,
+        exc: ClusterBuildError,
+    ) -> JSONResponse:
+        """Handle ClusterBuildError — returns 503 Service Unavailable."""
+        return _error_response(
+            503,
+            "cluster_build_error",
+            exc.message,
+            exc.detail,
+        )
+
+    @app.exception_handler(ClusterError)
+    async def cluster_error_handler(
+        request: Request,
+        exc: ClusterError,
+    ) -> JSONResponse:
+        """Handle ClusterError — returns 500 Internal Server Error."""
+        return _error_response(
+            500,
+            "cluster_error",
             exc.message,
             exc.detail,
         )
