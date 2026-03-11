@@ -182,13 +182,13 @@ class ClusterService:
             "computed_at": datetime.now(UTC),
         }
 
-    async def build_and_materialise(self, since_dt: datetime) -> int:
+    async def build_and_materialise(self, since_dt: datetime | int) -> int:
         """Build and persist story clusters for candidate source URLs.
 
         Filters events by ``date_added`` (GDELT YYYYMMDDHHMMSS integer) to honour
         sub-day precision — e.g. a 36-hour rolling window starting mid-day.
         """
-        since_date_added = int(since_dt.strftime("%Y%m%d%H%M%S"))
+        since_date_added = _normalize_since_date_added(since_dt)
         try:
             candidates = await self._score_source_urls(since_date_added)
             cluster_rows: list[dict[str, Any]] = []
@@ -232,6 +232,20 @@ def _top_values(values: list[str], limit: int = 5) -> list[str]:
 def _sorted_unique(values: Any) -> list[str]:
     """Return sorted unique string values from an iterable."""
     return sorted({value for value in values if value})
+
+
+def _normalize_since_date_added(value: datetime | int) -> int:
+    """Convert datetime or CLI-style integer inputs into DATEADDED format."""
+    if isinstance(value, datetime):
+        return int(value.strftime("%Y%m%d%H%M%S"))
+
+    normalized = str(value)
+    if len(normalized) == 8:
+        return int(f"{normalized}000000")
+    if len(normalized) == 14:
+        return int(normalized)
+
+    raise ValueError("since_dt must be a datetime or a YYYYMMDD / YYYYMMDDHHMMSS integer")
 
 
 def _parse_gdelt_timestamp(value: int) -> datetime:

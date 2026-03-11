@@ -148,6 +148,38 @@ async def test_build_and_materialise_skips_low_scoring_sources(db_session) -> No
     assert result.scalars().all() == []
 
 
+async def test_build_and_materialise_accepts_date_only_integer_since(db_session) -> None:
+    source_url = "https://example.com/story"
+    db_session.add_all(
+        [
+            _make_event(
+                301, source_url=source_url, num_mentions=500, num_sources=50, num_articles=500
+            ),
+            _make_event(
+                302, source_url=source_url, num_mentions=500, num_sources=50, num_articles=500
+            ),
+            GdeltMention(
+                global_event_id=301,
+                mention_time_date=20260310093000,
+                mention_source_name="example.com",
+                mention_identifier=source_url,
+                mention_doc_tone=-3.5,
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    service = ClusterService(db_session)
+    count = await service.build_and_materialise(20260308)
+    await db_session.commit()
+
+    assert count == 1
+
+    result = await db_session.execute(select(StoryCluster))
+    clusters = result.scalars().all()
+    assert len(clusters) == 1
+
+
 async def test_build_and_materialise_merges_clusters_sharing_mention_url(db_session):
     """Two source URLs sharing a mention URL must produce one cluster in DB, not two."""
     from app.db.models import GdeltEvent, GdeltMention
