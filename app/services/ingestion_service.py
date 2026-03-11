@@ -45,28 +45,41 @@ async def run_bootstrap(session: AsyncSession) -> dict[str, Any]:
     Downloads all export files from masterfilelist.txt within [now - retention_days, now].
     """
     settings = get_settings()
-    logger.info("starting_bootstrap_ingestion")
+    since_ts = _days_ago_ts(settings.retention_days)
+    until_ts = _now_ts()
+
+    return await run_bootstrap_range(session, since_ts=since_ts, until_ts=until_ts)
+
+
+async def run_bootstrap_range(
+    session: AsyncSession, since_ts: int, until_ts: int
+) -> dict[str, Any]:
+    """Run bootstrap ingestion for an explicit inclusive DATEADDED timestamp range."""
+    if since_ts > until_ts:
+        raise ValueError("Bootstrap start timestamp must be less than or equal to end timestamp")
+
+    logger.info("starting_bootstrap_ingestion", since_ts=since_ts, until_ts=until_ts)
 
     run = await ingestion_repository.create_ingestion_run(
         session, ingestion_repository.IngestionType.BOOTSTRAP
     )
     await session.commit()
 
-    since_ts = _days_ago_ts(settings.retention_days)
-    until_ts = _now_ts()
     total_ingested = 0
-    last_watermark = until_ts
+    final_watermark = until_ts
 
     gdelt = _get_gdelt_client()
     mentions_repo = MentionsRepository(session)
     gkg_repo = GkgRepository(session)
     try:
         file_list = await gdelt.fetch_master_export_urls(since_ts=since_ts, until_ts=until_ts)
+        requested_files = [
+            (url, file_ts) for url, file_ts in file_list if since_ts <= file_ts <= until_ts
+        ]
 
-        for url, file_ts in file_list:
+        for url, file_ts in requested_files:
             rows = await gdelt.download_events(url)
             if not rows:
-                last_watermark = file_ts
                 continue
 
             events = [_row_to_event_dict(row) for row in rows]
@@ -77,7 +90,6 @@ async def run_bootstrap(session: AsyncSession) -> dict[str, Any]:
             await _ingest_gkg_batch(gdelt, gkg_repo, session, file_ts)
 
             total_ingested += inserted
-            last_watermark = file_ts
             logger.info(
                 "bootstrap_batch_ingested",
                 url=url,
@@ -90,16 +102,16 @@ async def run_bootstrap(session: AsyncSession) -> dict[str, Any]:
             session,
             run.id,
             ingestion_repository.IngestionStatus.COMPLETED,
-            watermark_dateadded=last_watermark,
+            watermark_dateadded=final_watermark,
             events_ingested=total_ingested,
         )
         await session.commit()
 
-        logger.info("bootstrap_completed", total_ingested=total_ingested, watermark=last_watermark)
+        logger.info("bootstrap_completed", total_ingested=total_ingested, watermark=final_watermark)
         return {
             "status": "completed",
             "events_ingested": total_ingested,
-            "watermark": last_watermark,
+            "watermark": final_watermark,
         }
 
     except Exception as e:

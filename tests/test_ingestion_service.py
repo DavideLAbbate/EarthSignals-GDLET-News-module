@@ -175,6 +175,179 @@ async def test_run_bootstrap_no_files(mock_gdelt_client, db_session):
 
 
 @pytest.mark.asyncio
+async def test_run_bootstrap_range_rejects_inverted_bounds(db_session):
+    """Explicit bootstrap bounds must be ordered chronologically."""
+    from app.services import ingestion_service
+
+    with pytest.raises(ValueError, match="start.*end"):
+        await ingestion_service.run_bootstrap_range(
+            db_session,
+            since_ts=20260309000000,
+            until_ts=20260308235959,
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_bootstrap_range_ingests_requested_window_and_persists_until_watermark(
+    mock_gdelt_client, db_session
+):
+    """Explicit bootstrap range should ignore out-of-window files and persist the requested end watermark."""
+    from app.services import ingestion_service
+
+    since_ts = 20260301000000
+    until_ts = 20260301235959
+
+    mock_gdelt_client.fetch_master_export_urls = AsyncMock(
+        return_value=[
+            ("https://fake/20260228234500.export.CSV.zip", 20260228234500),
+            ("https://fake/20260301000000.export.CSV.zip", 20260301000000),
+            ("https://fake/20260301120000.export.CSV.zip", 20260301120000),
+            ("https://fake/20260302000000.export.CSV.zip", 20260302000000),
+        ]
+    )
+    mock_gdelt_client.fetch_master_mentions_urls = AsyncMock(
+        side_effect=[
+            [("https://fake/20260301000000.mentions.CSV.zip", 20260301000000)],
+            [("https://fake/20260301120000.mentions.CSV.zip", 20260301120000)],
+        ]
+    )
+    mock_gdelt_client.fetch_master_gkg_urls = AsyncMock(
+        side_effect=[
+            [("https://fake/20260301000000.gkg.csv.zip", 20260301000000)],
+            [("https://fake/20260301120000.gkg.csv.zip", 20260301120000)],
+        ]
+    )
+    mock_gdelt_client.download_events = AsyncMock(
+        side_effect=[
+            [_make_gdelt_row(GLOBALEVENTID=1, DATEADDED=20260301000000)],
+            [_make_gdelt_row(GLOBALEVENTID=2, DATEADDED=20260301120000)],
+        ]
+    )
+    mock_gdelt_client.download_mentions = AsyncMock(
+        side_effect=[
+            [_make_mentions_row(GLOBALEVENTID=1, MentionIdentifier="https://example.com/story-1")],
+            [_make_mentions_row(GLOBALEVENTID=2, MentionIdentifier="https://example.com/story-2")],
+        ]
+    )
+    mock_gdelt_client.download_gkg = AsyncMock(
+        side_effect=[
+            [_make_gkg_row(GKGRECORDID="1", DocumentIdentifier="https://example.com/story-1")],
+            [_make_gkg_row(GKGRECORDID="2", DocumentIdentifier="https://example.com/story-2")],
+        ]
+    )
+
+    with patch.object(ingestion_service, "_get_gdelt_client", return_value=mock_gdelt_client):
+        result = await ingestion_service.run_bootstrap_range(
+            db_session,
+            since_ts=since_ts,
+            until_ts=until_ts,
+        )
+
+    assert result["status"] == "completed"
+    assert result["events_ingested"] == 2
+    assert result["watermark"] == until_ts
+    assert mock_gdelt_client.download_events.await_count == 2
+
+    events_result = await db_session.execute(select(GdeltEvent))
+    mentions_result = await db_session.execute(select(GdeltMention))
+    gkg_result = await db_session.execute(select(GdeltGkg))
+
+    assert len(events_result.scalars().all()) == 2
+    assert len(mentions_result.scalars().all()) == 2
+    assert len(gkg_result.scalars().all()) == 2
+
+    latest = await ingestion_repository.get_latest_successful_ingestion(
+        db_session,
+        ingestion_repository.IngestionType.BOOTSTRAP,
+    )
+    assert latest is not None
+    assert latest.watermark_dateadded == until_ts
+
+
+@pytest.mark.asyncio
+async def test_run_bootstrap_range_uses_bulk_insert_events(mock_gdelt_client, db_session):
+    """Explicit range bootstrap should route event writes through the chunk-safe repository helper."""
+    from app.services import ingestion_service
+
+    file_ts = 20260301000000
+    event_rows = [_make_gdelt_row(GLOBALEVENTID=11, DATEADDED=file_ts)]
+    expected_events = [ingestion_service._row_to_event_dict(row) for row in event_rows]
+
+    mock_gdelt_client.fetch_master_export_urls = AsyncMock(
+        return_value=[(f"https://fake/{file_ts}.export.CSV.zip", file_ts)]
+    )
+    mock_gdelt_client.download_events = AsyncMock(return_value=event_rows)
+
+    with (
+        patch.object(ingestion_service, "_get_gdelt_client", return_value=mock_gdelt_client),
+        patch.object(
+            ingestion_service.event_repository,
+            "bulk_insert_events",
+            AsyncMock(return_value=len(event_rows)),
+        ) as mock_bulk_insert,
+    ):
+        result = await ingestion_service.run_bootstrap_range(
+            db_session,
+            since_ts=file_ts,
+            until_ts=file_ts,
+        )
+
+    assert result["status"] == "completed"
+    mock_bulk_insert.assert_awaited_once_with(db_session, expected_events)
+
+
+@pytest.mark.asyncio
+async def test_run_bootstrap_range_keeps_events_when_mentions_and_gkg_fail(
+    mock_gdelt_client, db_session
+):
+    """Best-effort sidecar failures must not roll back explicit-range event ingestion."""
+    from app.services import ingestion_service
+
+    file_ts = 20260301000000
+
+    mock_gdelt_client.fetch_master_export_urls = AsyncMock(
+        return_value=[(f"https://fake/{file_ts}.export.CSV.zip", file_ts)]
+    )
+    mock_gdelt_client.fetch_master_mentions_urls = AsyncMock(
+        return_value=[(f"https://fake/{file_ts}.mentions.CSV.zip", file_ts)]
+    )
+    mock_gdelt_client.fetch_master_gkg_urls = AsyncMock(
+        return_value=[(f"https://fake/{file_ts}.gkg.csv.zip", file_ts)]
+    )
+    mock_gdelt_client.download_events = AsyncMock(
+        return_value=[_make_gdelt_row(GLOBALEVENTID=1, DATEADDED=file_ts)]
+    )
+    mock_gdelt_client.download_mentions = AsyncMock(side_effect=RuntimeError("mentions failed"))
+    mock_gdelt_client.download_gkg = AsyncMock(side_effect=RuntimeError("gkg failed"))
+
+    with patch.object(ingestion_service, "_get_gdelt_client", return_value=mock_gdelt_client):
+        result = await ingestion_service.run_bootstrap_range(
+            db_session,
+            since_ts=file_ts,
+            until_ts=file_ts,
+        )
+
+    assert result["status"] == "completed"
+    assert result["events_ingested"] == 1
+    assert result["watermark"] == file_ts
+
+    events_result = await db_session.execute(select(GdeltEvent))
+    mentions_result = await db_session.execute(select(GdeltMention))
+    gkg_result = await db_session.execute(select(GdeltGkg))
+
+    assert len(events_result.scalars().all()) == 1
+    assert len(mentions_result.scalars().all()) == 0
+    assert len(gkg_result.scalars().all()) == 0
+
+    latest = await ingestion_repository.get_latest_successful_ingestion(
+        db_session,
+        ingestion_repository.IngestionType.BOOTSTRAP,
+    )
+    assert latest is not None
+    assert latest.watermark_dateadded == file_ts
+
+
+@pytest.mark.asyncio
 async def test_run_incremental_downloads_new_file(mock_gdelt_client, db_session):
     """Incremental downloads all files newer than the watermark."""
     from app.services import ingestion_service
