@@ -65,7 +65,7 @@ class ClusterService:
                 num_mentions=row.num_mentions,
                 num_sources=row.num_sources,
             )
-            if topic_score < 4.0:
+            if topic_score < 3.6:
                 continue
             candidates.append(
                 {

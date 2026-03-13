@@ -78,9 +78,17 @@ _DOMINANT_FIELDS = (
 class ClusterMerger:
     """Fuse overlapping story clusters via mention-URL overlap and theme Jaccard similarity."""
 
-    def __init__(self, mention_overlap_min: int = 1, jaccard_threshold: float = 0.3) -> None:
+    def __init__(
+        self,
+        mention_overlap_min: int = 1,
+        jaccard_threshold: float = 0.3,
+        max_themes_for_jaccard: int | None = 50,
+        max_cluster_size: int | None = 2000,
+    ) -> None:
         self._mention_overlap_min = mention_overlap_min
         self._jaccard_threshold = jaccard_threshold
+        self._max_themes_for_jaccard = max_themes_for_jaccard
+        self._max_cluster_size = max_cluster_size
 
     def merge(self, clusters: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Merge related clusters into fused representations.
@@ -100,7 +108,10 @@ class ClusterMerger:
     # ── graph construction ───────────────────────────────────────────────────
 
     def _union_by_mention_overlap(self, clusters: list[dict[str, Any]], uf: _UnionFind) -> None:
-        """Union pairs of clusters whose shared mention URL count >= mention_overlap_min."""
+        """Union pairs of clusters whose shared mention URL count >= mention_overlap_min.
+
+        Skips the union if the resulting component would exceed max_cluster_size.
+        """
         url_to_indices: dict[str, list[int]] = defaultdict(list)
         for i, cluster in enumerate(clusters):
             for mid in cluster.get("mention_identifiers") or []:
@@ -115,19 +126,50 @@ class ClusterMerger:
 
         for (i, j), count in pair_overlap.items():
             if count >= self._mention_overlap_min:
+                if self._would_exceed_size_cap(clusters, uf, i, j):
+                    continue
                 uf.union(i, j)
 
     def _union_by_theme_jaccard(self, clusters: list[dict[str, Any]], uf: _UnionFind) -> None:
-        """Union pairs not yet connected whose theme Jaccard >= jaccard_threshold."""
+        """Union pairs not yet connected whose theme Jaccard >= jaccard_threshold.
+
+        Each cluster's theme set is truncated to max_themes_for_jaccard items before
+        computing similarity, preventing clusters with thousands of generic tags from
+        generating spurious high-Jaccard matches.
+        Skips the union if the resulting component would exceed max_cluster_size.
+        """
         n = len(clusters)
-        theme_sets = [set(c.get("themes") or []) for c in clusters]
+        cap = self._max_themes_for_jaccard
+        if cap is None:
+            theme_sets = [set(c.get("themes") or []) for c in clusters]
+        else:
+            theme_sets = [set(list(c.get("themes") or [])[:cap]) for c in clusters]
 
         for i in range(n):
             for j in range(i + 1, n):
                 if uf.find(i) == uf.find(j):
                     continue  # already merged — skip expensive Jaccard check
                 if _jaccard(theme_sets[i], theme_sets[j]) > self._jaccard_threshold:
+                    if self._would_exceed_size_cap(clusters, uf, i, j):
+                        continue
                     uf.union(i, j)
+
+    def _would_exceed_size_cap(
+        self, clusters: list[dict[str, Any]], uf: _UnionFind, i: int, j: int
+    ) -> bool:
+        """Return True if merging the components of i and j would exceed max_cluster_size."""
+        if self._max_cluster_size is None:
+            return False
+        ri, rj = uf.find(i), uf.find(j)
+        if ri == rj:
+            return False
+        size_i = sum(
+            c.get("event_count") or 0 for idx, c in enumerate(clusters) if uf.find(idx) == ri
+        )
+        size_j = sum(
+            c.get("event_count") or 0 for idx, c in enumerate(clusters) if uf.find(idx) == rj
+        )
+        return (size_i + size_j) > self._max_cluster_size
 
     # ── component extraction ─────────────────────────────────────────────────
 
