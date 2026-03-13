@@ -22,23 +22,6 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # ── Google Cloud / BigQuery ───────────────────────────────────────────
-    google_application_credentials: str = Field(
-        ...,
-        description="Path to GCP service account JSON key file",
-    )
-    gcp_project_id: str = Field(
-        ...,
-        description="GCP project ID for billing attribution",
-    )
-    gcp_service_account_json: str | None = Field(
-        default=None,
-        description="Optional inline GCP service account JSON for hosted deployments",
-    )
-    bq_max_results: int = Field(default=500, ge=1, le=10_000)
-    max_bq_scan_days: int = Field(default=3650, ge=1, le=36500)
-    bq_executor_max_workers: int = Field(default=4, ge=1, le=32)
-
     # ── Anthropic ─────────────────────────────────────────────────────────
     anthropic_api_key: str = Field(..., description="Anthropic API key")
     anthropic_model: str = Field(default="claude-opus-4-5")

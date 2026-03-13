@@ -28,18 +28,10 @@ class FilterInterpretationError(GDELTBackendError):
 
 class QueryValidationError(GDELTBackendError):
     """
-    Raised when the constructed BigQuery parameters fail validation
-    (e.g., date range exceeds MAX_BQ_SCAN_DAYS, missing required filter fields).
+    Raised when query parameters fail validation
+    (e.g., date range exceeds limits, missing required filter fields).
 
     Maps to HTTP 400 Bad Request.
-    """
-
-
-class BigQueryError(GDELTBackendError):
-    """
-    Raised when a BigQuery query fails at the transport or execution level.
-
-    Maps to HTTP 502 Bad Gateway.
     """
 
 
@@ -76,10 +68,9 @@ class RetentionError(GDELTBackendError):
 
 
 class LocalQueryError(GDELTBackendError):
-    """Raised when local PostgreSQL query fails.
+    """Raised when a local PostgreSQL query fails at the transport or execution level.
 
-    Replaces BigQueryError for runtime search operations.
-    BigQueryError is still used for ingestion-side queries.
+    Maps to HTTP 502 Bad Gateway.
     """
 
     def __init__(self, message: str) -> None:

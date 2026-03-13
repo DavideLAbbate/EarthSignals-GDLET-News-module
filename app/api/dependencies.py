@@ -1,9 +1,8 @@
 """
 FastAPI dependency providers.
 
-verify_api_key — validates X-API-Key header on protected endpoints
-get_db_session  — yields an async SQLAlchemy session
-get_bq_client   — returns the BigQuery client from app state
+verify_api_key       — validates X-API-Key header on protected endpoints
+get_db_session       — yields an async SQLAlchemy session
 get_anthropic_client — returns the Anthropic client from app state
 """
 
@@ -15,7 +14,6 @@ from fastapi.security import APIKeyHeader
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.integrations.bigquery_client import BigQueryClientWrapper
 
 # ── API Key Auth ──────────────────────────────────────────────────────────
 
@@ -49,17 +47,6 @@ from app.db.session import get_async_session  # noqa: E402
 
 
 # ── App State Accessors ───────────────────────────────────────────────────
-
-
-async def get_bq_client(request: Request) -> BigQueryClientWrapper:
-    """Return the BigQuery client singleton from app state."""
-    client = getattr(request.app.state, "bq_client", None)
-    if client is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={"error": "bq_unavailable", "message": "BigQuery client not initialized"},
-        )
-    return client
 
 
 async def get_anthropic_client(request: Request) -> anthropic.AsyncAnthropic:

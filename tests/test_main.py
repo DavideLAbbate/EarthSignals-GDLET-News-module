@@ -17,14 +17,12 @@ async def test_lifespan_schedules_metadata_sync_and_bootstrap_tasks():
     from app.main import lifespan
 
     app = MagicMock()
-    bq_client = MagicMock()
     scheduler = MagicMock(running=True)
     scheduled_tasks = []
 
     with (
         unittest.mock.patch("app.main.configure_logging"),
         unittest.mock.patch("app.main.get_settings") as get_settings,
-        unittest.mock.patch("app.main.create_bigquery_client", return_value=bq_client),
         unittest.mock.patch("app.main.create_anthropic_client", return_value=MagicMock()),
         unittest.mock.patch("app.main.create_scheduler", return_value=scheduler),
         unittest.mock.patch("app.main.add_sync_job"),
@@ -51,7 +49,7 @@ async def test_lifespan_schedules_metadata_sync_and_bootstrap_tasks():
             pass
 
     assert scheduled_tasks == ["metadata_sync", "startup_ingestion"]
-    trigger_sync_now.assert_called_once_with(bq_client)
+    trigger_sync_now.assert_called_once_with()
     trigger_startup_ingestion_if_needed.assert_called_once_with()
 
 
@@ -63,14 +61,12 @@ async def test_lifespan_skips_startup_sync_when_disabled():
     from app.main import lifespan
 
     app = MagicMock()
-    bq_client = MagicMock()
     scheduler = MagicMock(running=True)
     scheduled_tasks = []
 
     with (
         unittest.mock.patch("app.main.configure_logging"),
         unittest.mock.patch("app.main.get_settings") as get_settings,
-        unittest.mock.patch("app.main.create_bigquery_client", return_value=bq_client),
         unittest.mock.patch("app.main.create_anthropic_client", return_value=MagicMock()),
         unittest.mock.patch("app.main.create_scheduler", return_value=scheduler),
         unittest.mock.patch("app.main.add_sync_job"),
@@ -110,14 +106,12 @@ async def test_lifespan_does_not_schedule_extra_startup_task_for_event_enrichmen
     from app.main import lifespan
 
     app = MagicMock()
-    bq_client = MagicMock()
     scheduler = MagicMock(running=True)
     scheduled_tasks = []
 
     with (
         unittest.mock.patch("app.main.configure_logging"),
         unittest.mock.patch("app.main.get_settings") as get_settings,
-        unittest.mock.patch("app.main.create_bigquery_client", return_value=bq_client),
         unittest.mock.patch("app.main.create_anthropic_client", return_value=MagicMock()),
         unittest.mock.patch("app.main.create_scheduler", return_value=scheduler),
         unittest.mock.patch("app.main.add_sync_job") as add_sync_job,
@@ -143,7 +137,7 @@ async def test_lifespan_does_not_schedule_extra_startup_task_for_event_enrichmen
         async with lifespan(app):
             pass
 
-    add_sync_job.assert_called_once_with(scheduler, bq_client)
+    add_sync_job.assert_called_once_with(scheduler)
     assert scheduled_tasks == ["metadata_sync", "startup_ingestion"]
 
 
@@ -155,7 +149,6 @@ async def test_lifespan_tracks_and_drains_startup_tasks_before_resource_shutdown
     from app.main import lifespan
 
     app = MagicMock()
-    bq_client = MagicMock()
     scheduler = MagicMock(running=True)
     startup_tasks = [MagicMock(), MagicMock()]
     call_order: list[str] = []
@@ -170,7 +163,6 @@ async def test_lifespan_tracks_and_drains_startup_tasks_before_resource_shutdown
     with (
         unittest.mock.patch("app.main.configure_logging"),
         unittest.mock.patch("app.main.get_settings") as get_settings,
-        unittest.mock.patch("app.main.create_bigquery_client", return_value=bq_client),
         unittest.mock.patch("app.main.create_anthropic_client", return_value=MagicMock()),
         unittest.mock.patch("app.main.create_scheduler", return_value=scheduler),
         unittest.mock.patch("app.main.add_sync_job"),
@@ -191,14 +183,13 @@ async def test_lifespan_tracks_and_drains_startup_tasks_before_resource_shutdown
         get_settings.return_value.app_env = "test"
         schedule_startup_task.side_effect = lambda app, task_name, coroutine: coroutine.close()
         app.state.startup_tasks = startup_tasks
-        bq_client.shutdown.side_effect = lambda: call_order.append("bq_shutdown")
 
         async with lifespan(app):
             app.state.startup_tasks = startup_tasks
 
     shutdown_startup_tasks.assert_awaited_once_with(startup_tasks)
     scheduler.shutdown.assert_called_once_with(wait=False)
-    assert call_order == ["startup_tasks", "bq_shutdown", "dispose_engine"]
+    assert call_order == ["startup_tasks", "dispose_engine"]
 
 
 @pytest.mark.asyncio

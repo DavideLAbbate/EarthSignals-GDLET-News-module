@@ -13,11 +13,10 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import get_bq_client, verify_api_key
+from app.api.dependencies import verify_api_key
 from app.core.logging import get_logger
 from app.db.repositories.sync_repository import get_latest_sync_state
 from app.db.session import get_async_session
-from app.integrations.bigquery_client import BigQueryClientWrapper
 from app.integrations.country_codes import get_root_code_label
 from app.scheduler.scheduler import trigger_sync_now
 from app.schemas.sync import SyncStatusResponse, TopCountry, TopEventCode
@@ -79,7 +78,6 @@ async def get_sync_status(
     tags=["Sync"],
 )
 async def manual_sync_refresh(
-    bq_client: BigQueryClientWrapper = Depends(get_bq_client),
     _: str = Depends(verify_api_key),
 ) -> dict:
     global _last_manual_refresh
@@ -106,7 +104,7 @@ async def manual_sync_refresh(
     # Run sync in background (fire-and-forget via asyncio.create_task)
     import asyncio
 
-    asyncio.create_task(trigger_sync_now(bq_client))
+    asyncio.create_task(trigger_sync_now())
 
     return {
         "status": "sync_triggered",

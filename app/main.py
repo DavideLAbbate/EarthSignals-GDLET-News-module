@@ -35,7 +35,6 @@ from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
 from app.db.session import dispose_engine
 from app.integrations.anthropic_client import create_anthropic_client
-from app.integrations.bigquery_client import create_bigquery_client
 from app.scheduler.scheduler import (
     add_sync_job,
     create_scheduler,
@@ -114,10 +113,6 @@ async def lifespan(app: FastAPI):
 
     logger.info("application_startup", env=settings.app_env)
 
-    # ── BigQuery client ────────────────────────────────────────────────────
-    bq_client = create_bigquery_client()
-    app.state.bq_client = bq_client
-
     # ── Anthropic client ───────────────────────────────────────────────────
     anthropic_client = create_anthropic_client()
     app.state.anthropic_client = anthropic_client
@@ -126,14 +121,14 @@ async def lifespan(app: FastAPI):
     # ── Scheduler ──────────────────────────────────────────────────────────
     scheduler = create_scheduler()
     app.state.scheduler = scheduler
-    add_sync_job(scheduler, bq_client)
+    add_sync_job(scheduler)
     scheduler.start()
     logger.info("scheduler_started")
 
     # ── Initial sync on startup ────────────────────────────────────────────
     # Run async to not block startup — errors are handled inside sync_job
     if settings.enable_metadata_sync:
-        _schedule_startup_task(app, "metadata_sync", trigger_sync_now(bq_client))
+        _schedule_startup_task(app, "metadata_sync", trigger_sync_now())
     _schedule_startup_task(app, "startup_ingestion", trigger_startup_ingestion_if_needed())
 
     logger.info("application_ready")
@@ -147,8 +142,6 @@ async def lifespan(app: FastAPI):
     if scheduler.running:
         scheduler.shutdown(wait=False)
         logger.info("scheduler_stopped")
-
-    bq_client.shutdown()
 
     await dispose_engine()
     logger.info("application_shutdown_complete")

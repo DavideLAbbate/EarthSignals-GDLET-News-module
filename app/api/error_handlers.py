@@ -12,7 +12,6 @@ from fastapi.responses import JSONResponse
 
 from app.core.exceptions import (
     AnthropicUnavailableError,
-    BigQueryError,
     ClusterBuildError,
     ClusterError,
     FilterInterpretationError,
@@ -56,15 +55,6 @@ def register_error_handlers(app: FastAPI) -> None:
             400,
             "query_validation_error",
             exc.message,
-            exc.detail,
-        )
-
-    @app.exception_handler(BigQueryError)
-    async def handle_bigquery_error(request: Request, exc: BigQueryError) -> JSONResponse:
-        return _error_response(
-            502,
-            "bigquery_error",
-            "Failed to query GDELT dataset. Please try again.",
             exc.detail,
         )
 
@@ -121,7 +111,7 @@ def register_error_handlers(app: FastAPI) -> None:
         request: Request,
         exc: LocalQueryError,
     ) -> JSONResponse:
-        """Handle LocalQueryError - returns 502 (similar to BigQueryError)."""
+        """Handle LocalQueryError - returns 502."""
         return _error_response(
             502,
             "local_query_error",

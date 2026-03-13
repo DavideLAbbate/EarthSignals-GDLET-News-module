@@ -73,6 +73,8 @@ docker-compose.override.yml
 *.db
 *.sqlite
 *.sqlite3
+# Local Docker bind-mount data directory
+data/
 
 # ── Logs ──────────────────────────────────────────────────────────────────
 *.log

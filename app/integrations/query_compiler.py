@@ -12,7 +12,6 @@ class CompiledQuery(Protocol):
 
     Different backends will implement this differently:
     - PostgreSQL: returns a SQLAlchemy Select statement
-    - BigQuery: returns (sql_string, params) tuple
     - ClickHouse (future): returns ClickHouse-specific query
     """
 

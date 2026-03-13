@@ -22,7 +22,6 @@ from app.db.repositories.sync_repository import (
     upsert_sync_state,
 )
 from app.db.session import _get_session_factory
-from app.integrations.bigquery_client import BigQueryClientWrapper
 from app.integrations.country_codes import get_root_code_label
 
 logger = get_logger(__name__)
@@ -39,13 +38,11 @@ def _sqldate_30_days_ago() -> int:
     return int(d.strftime("%Y%m%d"))
 
 
-async def run_gdelt_sync(bq_client: BigQueryClientWrapper | None = None) -> None:
+async def run_gdelt_sync() -> None:
     """
     Execute the full GDELT metadata refresh.
 
     Metadata is derived from the local event store and written atomically.
-    The optional BigQuery client argument is retained for compatibility with
-    existing scheduler and dependency wiring.
     """
     mapping_version = datetime.now(timezone.utc).isoformat()
     logger.info("gdelt_sync_start", mapping_version=mapping_version)

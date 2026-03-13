@@ -13,7 +13,6 @@ from fastapi.testclient import TestClient
 from app.api.error_handlers import register_error_handlers
 from app.core.exceptions import (
     AnthropicUnavailableError,
-    BigQueryError,
     ClusterBuildError,
     ClusterError,
     FilterInterpretationError,
@@ -49,14 +48,6 @@ def test_query_validation_error_returns_400():
     response = client.get("/test")
     assert response.status_code == 400
     assert response.json()["error"] == "query_validation_error"
-
-
-def test_bigquery_error_returns_502():
-    app = _make_test_app_with_route(BigQueryError("BQ failed"))
-    client = TestClient(app, raise_server_exceptions=False)
-    response = client.get("/test")
-    assert response.status_code == 502
-    assert response.json()["error"] == "bigquery_error"
 
 
 def test_anthropic_unavailable_returns_503_with_retry_after():
@@ -105,7 +96,6 @@ def test_error_response_always_json():
     exceptions = [
         FilterInterpretationError("x"),
         QueryValidationError("x"),
-        BigQueryError("x"),
         AnthropicUnavailableError("x"),
         SyncError("x"),
         ClusterBuildError("x"),

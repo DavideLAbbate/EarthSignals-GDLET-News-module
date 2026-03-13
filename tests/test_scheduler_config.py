@@ -13,8 +13,6 @@ from app.core.config import Settings
 
 def _base_settings_overrides() -> dict[str, Any]:
     return {
-        "google_application_credentials": "test-service-account.json",
-        "gcp_project_id": "test-project",
         "anthropic_api_key": "test-anthropic-key",
         "database_url": "sqlite+aiosqlite:///:memory:",
         "api_key": "test-api-key",
@@ -98,7 +96,7 @@ def test_add_sync_job_skips_metadata_sync_when_disabled():
         mock_settings.return_value.ingestion_interval_minutes = 60
         mock_settings.return_value.enable_event_enrichment = False
 
-        scheduler.add_sync_job(mock_scheduler, MagicMock())
+        scheduler.add_sync_job(mock_scheduler)
 
     job_calls = {
         call.kwargs.get("id"): call.kwargs for call in mock_scheduler.add_job.call_args_list
@@ -127,7 +125,7 @@ def test_add_sync_job_registers_event_enrichment_when_enabled():
         mock_settings.return_value.enable_event_enrichment = True
         mock_settings.return_value.event_enrichment_interval_minutes = 45
 
-        scheduler.add_sync_job(mock_scheduler, MagicMock())
+        scheduler.add_sync_job(mock_scheduler)
 
     enrichment_calls = [
         call
@@ -162,7 +160,7 @@ def test_add_sync_job_skips_event_enrichment_when_disabled():
         mock_settings.return_value.enable_event_enrichment = False
         mock_settings.return_value.event_enrichment_interval_minutes = 30
 
-        scheduler.add_sync_job(mock_scheduler, MagicMock())
+        scheduler.add_sync_job(mock_scheduler)
 
     job_ids = [call.kwargs.get("id") for call in mock_scheduler.add_job.call_args_list]
     assert "gdelt_event_enrichment" not in job_ids
@@ -185,7 +183,7 @@ def test_add_sync_job_registers_cluster_materialisation_when_enabled():
         mock_settings.return_value.enable_cluster_materialisation = True
         mock_settings.return_value.cluster_interval_minutes = 90
 
-        scheduler.add_sync_job(mock_scheduler, MagicMock())
+        scheduler.add_sync_job(mock_scheduler)
 
     cluster_calls = [
         call
@@ -215,7 +213,7 @@ def test_add_sync_job_skips_cluster_materialisation_when_disabled():
         mock_settings.return_value.enable_cluster_materialisation = False
         mock_settings.return_value.cluster_interval_minutes = 60
 
-        scheduler.add_sync_job(mock_scheduler, MagicMock())
+        scheduler.add_sync_job(mock_scheduler)
 
     job_ids = [call.kwargs.get("id") for call in mock_scheduler.add_job.call_args_list]
     assert "gdelt_cluster_materialisation" not in job_ids

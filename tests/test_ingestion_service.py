@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -10,6 +9,38 @@ from sqlalchemy import select
 
 from app.db.models import GdeltEvent, GdeltGkg, GdeltMention
 from app.db.repositories import ingestion_repository
+
+
+class _SingleAccessRun:
+    """Test double that fails if its id is read more than once."""
+
+    def __init__(self, run_id: int) -> None:
+        self._run_id = run_id
+        self._reads = 0
+
+    @property
+    def id(self) -> int:
+        self._reads += 1
+        if self._reads > 1:
+            raise RuntimeError("run.id accessed more than once")
+        return self._run_id
+
+
+class _ExpiringRun:
+    """Test double that simulates an ORM instance expired after commit/rollback."""
+
+    def __init__(self, run_id: int) -> None:
+        self._run_id = run_id
+        self._expired = False
+
+    def expire(self) -> None:
+        self._expired = True
+
+    @property
+    def id(self) -> int:
+        if self._expired:
+            raise RuntimeError("run.id unavailable after expiration")
+        return self._run_id
 
 
 @pytest.fixture
@@ -348,6 +379,57 @@ async def test_run_bootstrap_range_keeps_events_when_mentions_and_gkg_fail(
 
 
 @pytest.mark.asyncio
+async def test_run_bootstrap_range_caches_run_id_before_failure(mock_gdelt_client):
+    """Bootstrap range must not touch run.id again after rollback starts."""
+    from app.services import ingestion_service
+
+    run = _ExpiringRun(321)
+    session = AsyncMock()
+    session.commit = AsyncMock(side_effect=run.expire)
+    session.rollback = AsyncMock()
+
+    file_ts = 20990308120000
+    mock_gdelt_client.fetch_master_export_urls = AsyncMock(
+        return_value=[(f"https://fake/{file_ts}.export.CSV.zip", file_ts)]
+    )
+    mock_gdelt_client.download_events = AsyncMock(return_value=[_make_gdelt_row()])
+
+    with (
+        patch.object(ingestion_service, "_get_gdelt_client", return_value=mock_gdelt_client),
+        patch.object(
+            ingestion_service.ingestion_repository,
+            "create_ingestion_run",
+            AsyncMock(return_value=run),
+        ),
+        patch.object(
+            ingestion_service.event_repository,
+            "bulk_insert_events",
+            AsyncMock(side_effect=RuntimeError("insert failed")),
+        ),
+        patch.object(
+            ingestion_service.ingestion_repository,
+            "update_ingestion_run",
+            AsyncMock(),
+        ) as mock_update_run,
+    ):
+        with pytest.raises(RuntimeError, match="insert failed"):
+            await ingestion_service.run_bootstrap_range(
+                session,
+                since_ts=file_ts,
+                until_ts=file_ts,
+            )
+
+    session.rollback.assert_awaited_once()
+    mock_update_run.assert_awaited_once_with(
+        session,
+        321,
+        ingestion_repository.IngestionStatus.FAILED,
+        error_message="insert failed",
+    )
+    mock_gdelt_client.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_run_incremental_downloads_new_file(mock_gdelt_client, db_session):
     """Incremental downloads all files newer than the watermark."""
     from app.services import ingestion_service
@@ -681,8 +763,9 @@ async def test_run_incremental_rolls_back_before_marking_failed(mock_gdelt_clien
     """Incremental rolls back the session before recording a failed run."""
     from app.services import ingestion_service
 
+    run = _ExpiringRun(123)
     session = AsyncMock()
-    session.commit = AsyncMock()
+    session.commit = AsyncMock(side_effect=run.expire)
     session.rollback = AsyncMock()
 
     mock_gdelt_client.fetch_master_export_urls = AsyncMock(
@@ -700,7 +783,7 @@ async def test_run_incremental_rolls_back_before_marking_failed(mock_gdelt_clien
         patch.object(
             ingestion_service.ingestion_repository,
             "create_ingestion_run",
-            AsyncMock(return_value=SimpleNamespace(id=123)),
+            AsyncMock(return_value=run),
         ),
         patch.object(
             ingestion_service.event_repository,

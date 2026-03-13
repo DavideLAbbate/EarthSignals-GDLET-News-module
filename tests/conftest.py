@@ -3,7 +3,7 @@ Shared test fixtures.
 
 Uses pytest-asyncio with asyncio_mode = "auto" (set in pyproject.toml).
 All DB tests use an in-memory SQLite database via SQLAlchemy async engine.
-BigQuery and Anthropic clients are always mocked.
+The Anthropic client is always mocked.
 """
 
 from __future__ import annotations
@@ -16,8 +16,6 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 # Set required env vars before importing app modules
-os.environ.setdefault("GOOGLE_APPLICATION_CREDENTIALS", "/tmp/fake-key.json")
-os.environ.setdefault("GCP_PROJECT_ID", "test-project")
 os.environ.setdefault("ANTHROPIC_API_KEY", "sk-ant-test")
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 os.environ.setdefault("API_KEY", "test-api-key")
@@ -67,16 +65,6 @@ async def db_session(db_engine):
 
 
 @pytest.fixture
-def mock_bq_client():
-    """Mock BigQuery client that returns empty results by default."""
-    client = MagicMock()
-    client.run_query = AsyncMock(return_value=[])
-    client.run_query_single_value = AsyncMock(return_value=None)
-    client.shutdown = MagicMock()
-    return client
-
-
-@pytest.fixture
 def mock_anthropic_client():
     """Mock Anthropic async client."""
     client = AsyncMock()
@@ -84,7 +72,7 @@ def mock_anthropic_client():
 
 
 @pytest.fixture
-def app(db_session, mock_bq_client, mock_anthropic_client):
+def app(db_session, mock_anthropic_client):
     """Create a test FastAPI app with mocked dependencies."""
     # Clear settings cache to ensure fresh settings
     from app.core.config import get_settings
@@ -108,7 +96,6 @@ def app(db_session, mock_bq_client, mock_anthropic_client):
         yield db_session
 
     test_app.dependency_overrides[get_async_session] = override_get_db
-    test_app.state.bq_client = mock_bq_client
     test_app.state.anthropic_client = mock_anthropic_client
     test_app.state.scheduler = MagicMock(running=True)
 

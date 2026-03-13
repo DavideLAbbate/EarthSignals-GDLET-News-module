@@ -162,11 +162,8 @@ async def test_search_events_empty_filters(async_client, api_headers, mock_anthr
     assert response.status_code == 422
 
 
-async def test_search_events_empty_bq_results(
-    async_client, api_headers, anthropic_mock_success, mock_bq_client
-):
-    """Request returning no BQ rows returns empty results array."""
-    mock_bq_client.run_query = AsyncMock(return_value=[])
+async def test_search_events_empty_results(async_client, api_headers, anthropic_mock_success):
+    """Request returning no local DB rows returns empty results array."""
     response = await async_client.post(
         "/events/search",
         json={"country": "Italy", "date_range": {"from": 2023, "to": 2024}},

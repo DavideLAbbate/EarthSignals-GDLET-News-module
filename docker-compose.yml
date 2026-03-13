@@ -33,9 +33,6 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    volumes:
-      # Mount GCP service account key as a secret
-      - ./bigQuery/web-journal-news-1e1a891748e0.json:/run/secrets/gcp-key.json:ro
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s

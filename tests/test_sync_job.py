@@ -57,7 +57,7 @@ async def test_sync_job_writes_sync_state(db_session):
 
     with unittest.mock.patch("app.scheduler.sync_job._get_session_factory") as mock_factory:
         mock_factory.return_value = lambda: mock_factory_instance
-        await run_gdelt_sync(MagicMock())
+        await run_gdelt_sync()
 
     # Verify SyncState was written
     sync_state = await get_latest_sync_state(db_session)
@@ -88,16 +88,16 @@ async def test_sync_job_handles_db_error_gracefully(db_session):
         ),
     ):
         mock_factory.return_value = lambda: mock_factory_instance
-        await run_gdelt_sync(MagicMock())
+        await run_gdelt_sync()
 
     sync_state = await get_latest_sync_state(db_session)
     assert sync_state is not None
     assert sync_state.sync_status == "error"
 
 
-async def test_sync_job_skips_when_no_client():
-    """Local metadata sync does not require a BigQuery client."""
-    await run_gdelt_sync(None)
+async def test_sync_job_runs_without_arguments():
+    """Metadata sync runs successfully with no arguments."""
+    await run_gdelt_sync()
 
 
 async def test_sync_job_idempotent(db_session):
@@ -125,8 +125,8 @@ async def test_sync_job_idempotent(db_session):
 
     with unittest.mock.patch("app.scheduler.sync_job._get_session_factory") as mock_factory:
         mock_factory.return_value = lambda: mock_factory_instance
-        await run_gdelt_sync(MagicMock())
-        await run_gdelt_sync(MagicMock())
+        await run_gdelt_sync()
+        await run_gdelt_sync()
 
     from sqlalchemy import select
     from app.db.models import SyncState

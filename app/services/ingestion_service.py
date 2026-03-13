@@ -63,6 +63,7 @@ async def run_bootstrap_range(
     run = await ingestion_repository.create_ingestion_run(
         session, ingestion_repository.IngestionType.BOOTSTRAP
     )
+    run_id = run.id
     await session.commit()
 
     total_ingested = 0
@@ -100,7 +101,7 @@ async def run_bootstrap_range(
 
         await ingestion_repository.update_ingestion_run(
             session,
-            run.id,
+            run_id,
             ingestion_repository.IngestionStatus.COMPLETED,
             watermark_dateadded=final_watermark,
             events_ingested=total_ingested,
@@ -119,7 +120,7 @@ async def run_bootstrap_range(
         await session.rollback()
         await ingestion_repository.update_ingestion_run(
             session,
-            run.id,
+            run_id,
             ingestion_repository.IngestionStatus.FAILED,
             error_message=str(e),
         )
@@ -153,6 +154,7 @@ async def run_incremental(session: AsyncSession) -> dict[str, Any]:
     run = await ingestion_repository.create_ingestion_run(
         session, ingestion_repository.IngestionType.INCREMENTAL
     )
+    run_id = run.id
     await session.commit()
 
     total_ingested = 0
@@ -191,7 +193,7 @@ async def run_incremental(session: AsyncSession) -> dict[str, Any]:
 
         await ingestion_repository.update_ingestion_run(
             session,
-            run.id,
+            run_id,
             ingestion_repository.IngestionStatus.COMPLETED,
             watermark_dateadded=last_watermark,
             events_ingested=total_ingested,
@@ -212,7 +214,7 @@ async def run_incremental(session: AsyncSession) -> dict[str, Any]:
         await session.rollback()
         await ingestion_repository.update_ingestion_run(
             session,
-            run.id,
+            run_id,
             ingestion_repository.IngestionStatus.FAILED,
             error_message=str(e),
         )

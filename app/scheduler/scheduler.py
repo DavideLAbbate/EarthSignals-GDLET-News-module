@@ -58,7 +58,7 @@ def create_scheduler() -> AsyncIOScheduler:
     return scheduler
 
 
-def add_sync_job(scheduler: AsyncIOScheduler, bq_client) -> None:
+def add_sync_job(scheduler: AsyncIOScheduler) -> None:
     """
     Register the GDELT sync job with the scheduler.
 
@@ -76,7 +76,6 @@ def add_sync_job(scheduler: AsyncIOScheduler, bq_client) -> None:
             id="gdelt_sync",
             max_instances=1,
             replace_existing=True,
-            kwargs={"bq_client": bq_client},
         )
         logger.info(
             "sync_job_registered",
@@ -144,7 +143,7 @@ def add_sync_job(scheduler: AsyncIOScheduler, bq_client) -> None:
     logger.info("retention_job_registered", interval_hours=24)
 
 
-async def trigger_sync_now(bq_client) -> None:
+async def trigger_sync_now() -> None:
     """
     Trigger an immediate sync outside the scheduler interval.
 
@@ -152,7 +151,7 @@ async def trigger_sync_now(bq_client) -> None:
     Runs the sync job directly as a coroutine (not via scheduler).
     """
     logger.info("sync_triggered_manually")
-    await run_gdelt_sync(bq_client)
+    await run_gdelt_sync()
 
 
 async def trigger_startup_ingestion_if_needed() -> None:
