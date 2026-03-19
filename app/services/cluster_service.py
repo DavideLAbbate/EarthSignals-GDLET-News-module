@@ -12,6 +12,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.exceptions import ClusterBuildError
 from app.core.logging import get_logger
 from app.db.models import GdeltEvent, GdeltGkg, GdeltMention
@@ -47,7 +48,14 @@ class ClusterService:
         since_date_added: int,
         until_date_added: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Return candidate source URLs and their aggregated topic scores."""
+        """Return candidate source URLs and their aggregated topic scores.
+
+        Source URLs whose domain appears in ``cluster_source_domain_blocklist``
+        are excluded before scoring. These are pure aggregators / content farms
+        that produce no original journalism and pollute dominant_countries and
+        themes with unrelated geographies and topics.
+        """
+        blocklist = get_settings().cluster_source_domain_blocklist
         filters = [
             GdeltEvent.date_added >= since_date_added,
             GdeltEvent.source_url.is_not(None),
@@ -68,8 +76,18 @@ class ClusterService:
         result = await self._session.execute(stmt)
 
         candidates: list[dict[str, Any]] = []
+        blocked = 0
         for row in result.all():
             if not row.source_url:
+                continue
+            # Extract domain from URL and check against blocklist.
+            # Handles both "https://www.example.com/path" and "http://example.com/path".
+            try:
+                domain = row.source_url.split("//", 1)[1].split("/", 1)[0].lower()
+            except IndexError:
+                domain = ""
+            if domain in blocklist:
+                blocked += 1
                 continue
             topic_score = compute_topic_score(
                 event_count=row.event_count,
@@ -88,6 +106,10 @@ class ClusterService:
                     "num_sources": row.num_sources,
                     "topic_score": topic_score,
                 }
+            )
+        if blocked:
+            logger.info(
+                "cluster_candidates_blocked", blocked=blocked, blocklist_size=len(blocklist)
             )
 
         candidates.sort(key=lambda item: item["topic_score"], reverse=True)
@@ -166,7 +188,14 @@ class ClusterService:
         mentions: list[GdeltMention],
         gkg_rows: list[GdeltGkg],
     ) -> dict[str, Any]:
-        """Build a single materialised cluster row."""
+        """Build a single materialised cluster row.
+
+        ``gkg_rows`` must contain only the GKG rows whose ``document_identifier``
+        matches the cluster's ``source_url`` — i.e. the GKG record *of* the article
+        itself, not the GKG records of articles that merely cite it. Using mention GKG
+        rows would contaminate themes/persons/organizations with entities from hundreds
+        of unrelated documents.
+        """
         source_url = doc["source_url"]
         # cluster_id must be stable across runs: keyed solely on source_url so that
         # the same story is always upserted into the same row regardless of which day
@@ -302,21 +331,17 @@ class ClusterService:
                 elapsed_s=round(t_mentions - t_events, 2),
             )
 
-            # ── Batch query 3: all GKG rows for all mention identifier URLs ───────
-            all_mention_identifiers: list[str] = list(
-                {
-                    mention.mention_identifier
-                    for event_id in all_event_ids
-                    for mention in mentions_by_event.get(event_id, [])
-                    if mention.mention_identifier
-                }
-            )
-            gkg_by_identifier = await self._batch_collect_gkg(all_mention_identifiers)
-            total_gkg = sum(len(v) for v in gkg_by_identifier.values())
+            # ── Batch query 3: GKG rows for the source URLs themselves ───────────
+            # themes/persons/organizations/tone are extracted ONLY from the GKG row
+            # whose document_identifier matches the cluster's source_url. Using GKG
+            # rows from mention_identifiers (documents that cite the source) would
+            # contaminate the cluster with entities from hundreds of unrelated articles.
+            source_gkg_by_url = await self._batch_collect_gkg(source_urls)
+            total_gkg = sum(len(v) for v in source_gkg_by_url.values())
             t_gkg = time.monotonic()
             logger.info(
                 "cluster_phase_gkg",
-                unique_identifiers=len(all_mention_identifiers),
+                unique_identifiers=len(source_urls),
                 total_gkg=total_gkg,
                 elapsed_s=round(t_gkg - t_mentions, 2),
             )
@@ -330,15 +355,10 @@ class ClusterService:
                 mentions: list[GdeltMention] = [
                     m for eid in event_ids_for_url for m in mentions_by_event.get(eid, [])
                 ]
-                mention_identifier_set: set[str] = {
-                    m.mention_identifier for m in mentions if m.mention_identifier
-                }
-                gkg_rows: list[GdeltGkg] = [
-                    row
-                    for identifier in mention_identifier_set
-                    for row in gkg_by_identifier.get(identifier, [])
-                ]
-                cluster_rows.append(self._build_cluster(candidate, events, mentions, gkg_rows))
+                source_gkg_rows: list[GdeltGkg] = source_gkg_by_url.get(url, [])
+                cluster_rows.append(
+                    self._build_cluster(candidate, events, mentions, source_gkg_rows)
+                )
             t_build = time.monotonic()
             logger.info(
                 "cluster_phase_build",

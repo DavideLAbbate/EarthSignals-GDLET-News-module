@@ -58,6 +58,49 @@ class Settings(BaseSettings):
     # ── Rate Limiting ─────────────────────────────────────────────────────
     rate_limit_per_minute: int = Field(default=10, ge=1, le=1000)
 
+    # ── Cluster pipeline ──────────────────────────────────────────────────
+    # Domains whose source URLs are excluded from cluster candidate scoring.
+    # These are pure aggregators / content farms that produce no original
+    # journalism: they copy feeds from wire services, inflating topic_score
+    # and contaminating dominant_countries with unrelated geographies.
+    # Override via CLUSTER_SOURCE_DOMAIN_BLOCKLIST env var as a JSON array:
+    #   CLUSTER_SOURCE_DOMAIN_BLOCKLIST='["www.yahoo.com","www.aol.com"]'
+    cluster_source_domain_blocklist: frozenset[str] = Field(
+        default=frozenset(
+            {
+                "www.yahoo.com",
+                "www.aol.com",
+                "www.aol.co.uk",
+                "www.dailymail.co.uk",
+                "www.mirror.co.uk",
+                "www.express.co.uk",
+                "www.winnipegfreepress.com",
+                "www.bignewsnetwork.com",
+                "www.miragenews.com",
+                "countercurrents.org",
+                "www.globalsecurity.org",
+            }
+        ),
+        description="Source URL domains excluded from cluster candidate scoring.",
+    )
+
+    @field_validator("cluster_source_domain_blocklist", mode="before")
+    @classmethod
+    def parse_domain_blocklist(cls, v: str | list | set | frozenset) -> frozenset[str]:
+        if isinstance(v, (frozenset, set)):
+            return frozenset(v)
+        if isinstance(v, list):
+            return frozenset(v)
+        if isinstance(v, str):
+            try:
+                parsed = json.loads(v)
+                if isinstance(parsed, list):
+                    return frozenset(parsed)
+            except (json.JSONDecodeError, ValueError):
+                pass
+            return frozenset(d.strip() for d in v.split(",") if d.strip())
+        return frozenset()
+
     @field_validator("cors_origins", mode="before")
     @classmethod
     def parse_cors_origins(cls, v: str | list) -> list[str]:

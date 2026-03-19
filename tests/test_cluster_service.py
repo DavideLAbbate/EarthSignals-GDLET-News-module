@@ -123,11 +123,112 @@ async def test_build_and_materialise_creates_story_cluster(db_session) -> None:
     assert "IR" in (cluster.dominant_countries or [])
     assert cluster.mention_count == 2
     assert sorted(cluster.distinct_mention_sources or []) == ["example.com", "mirror.example.com"]
-    assert sorted(cluster.themes or []) == ["ARMEDCONFLICT", "IRAN", "MILITARY_ACTION"]
+    # themes/persons/organizations/locations/tone come only from the GKG row whose
+    # document_identifier == source_url. The mirror GKG (MILITARY_ACTION, Bahrain,
+    # tone=-6.0) must NOT appear — it belongs to a citing article, not the source.
+    assert sorted(cluster.themes or []) == ["ARMEDCONFLICT", "IRAN"]
     assert sorted(cluster.persons or []) == ["Mojtaba Khamenei"]
     assert sorted(cluster.organizations or []) == ["IRGC"]
-    assert sorted(cluster.gkg_locations or []) == ["Bahrain", "Tehran, Tehran, Iran"]
-    assert cluster.document_tone_avg == pytest.approx(-7.0)
+    assert sorted(cluster.gkg_locations or []) == ["Tehran, Tehran, Iran"]
+    assert cluster.document_tone_avg == pytest.approx(-8.0)
+
+
+async def test_build_and_materialise_excludes_blocklisted_domains(db_session) -> None:
+    """Source URLs from blocklisted domains must never become cluster candidates."""
+    blocked_url = "https://www.yahoo.com/news/iran-attack-story"
+    clean_url = "https://www.reuters.com/world/iran-attack"
+
+    for i, (url, articles) in enumerate(
+        [
+            (blocked_url, 500),
+            (clean_url, 500),
+        ]
+    ):
+        db_session.add(
+            _make_event(
+                8000 + i,
+                source_url=url,
+                date_added=20260313060000,
+                num_articles=articles,
+                num_mentions=500,
+                num_sources=100,
+            )
+        )
+    await db_session.flush()
+
+    count = await ClusterService(db_session).build_and_materialise(20260313000000)
+    await db_session.commit()
+
+    result = await db_session.execute(select(StoryCluster))
+    clusters = result.scalars().all()
+    source_urls = {c.source_url for c in clusters}
+
+    assert blocked_url not in source_urls
+    assert clean_url in source_urls
+
+
+async def test_build_and_materialise_gkg_uses_only_source_url_document(db_session) -> None:
+    """themes/persons/orgs must come only from the GKG of the source URL itself.
+
+    A mention GKG (document_identifier = mention_identifier != source_url) must
+    not contaminate the cluster with unrelated entities. This was the root cause
+    of clusters containing 150+ themes and hundreds of unrelated persons.
+    """
+    source_url = "https://example.com/iran-story"
+    mention_url = "https://otherpaper.com/unrelated-article"
+
+    db_session.add_all(
+        [
+            _make_event(
+                201, source_url=source_url, num_mentions=500, num_sources=50, num_articles=500
+            ),
+            GdeltMention(
+                global_event_id=201,
+                mention_time_date=20260310093000,
+                mention_source_name="otherpaper.com",
+                mention_identifier=mention_url,
+                mention_doc_tone=-1.0,
+            ),
+            # GKG of the source article — clean, specific
+            GdeltGkg(
+                document_identifier=source_url,
+                themes=["ASSASSINATION", "IRAN"],
+                persons=["Ali Khamenei"],
+                organizations=["IRGC"],
+                locations=["Tehran, Tehran, Iran"],
+                document_tone=-9.0,
+            ),
+            # GKG of the citing article — must NOT appear in cluster
+            GdeltGkg(
+                document_identifier=mention_url,
+                themes=["ECONOMY", "BITCOIN", "UNITED_STATES"],
+                persons=["Elon Musk", "Abraham Lincoln"],
+                organizations=["Federal Reserve", "American Airlines"],
+                locations=["New York, New York, United States"],
+                document_tone=-1.0,
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    count = await ClusterService(db_session).build_and_materialise(datetime(2026, 3, 1, tzinfo=UTC))
+    await db_session.commit()
+    assert count == 1
+
+    result = await db_session.execute(select(StoryCluster))
+    cluster = result.scalars().one()
+
+    # Source GKG entities must be present
+    assert "ASSASSINATION" in (cluster.themes or [])
+    assert "Ali Khamenei" in (cluster.persons or [])
+    assert "IRGC" in (cluster.organizations or [])
+
+    # Mention GKG entities must NOT appear
+    assert "BITCOIN" not in (cluster.themes or [])
+    assert "Elon Musk" not in (cluster.persons or [])
+    assert "Abraham Lincoln" not in (cluster.persons or [])
+    assert "Federal Reserve" not in (cluster.organizations or [])
+    assert cluster.document_tone_avg == pytest.approx(-9.0)
 
 
 async def test_build_and_materialise_skips_low_scoring_sources(db_session) -> None:
