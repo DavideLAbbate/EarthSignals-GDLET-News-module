@@ -27,6 +27,10 @@ from app.services.cluster_merger import ClusterMerger
 
 logger = get_logger(__name__)
 
+# asyncpg hard limit for bind parameters per statement; SQLite is even tighter.
+_MAX_PG_ARGS = 32_767
+_MAX_SQLITE_ARGS = 999
+
 
 class ClusterService:
     """Orchestrates the story-cluster materialisation pipeline."""
@@ -81,25 +85,60 @@ class ClusterService:
         candidates.sort(key=lambda item: item["topic_score"], reverse=True)
         return candidates
 
-    async def _collect_events(self, source_url: str, since_date_added: int) -> list[GdeltEvent]:
-        """Return all recent events for the given source URL."""
-        result = await self._session.execute(
-            select(GdeltEvent)
-            .where(
-                GdeltEvent.source_url == source_url,
-                GdeltEvent.date_added >= since_date_added,
-            )
-            .order_by(GdeltEvent.date_added.asc(), GdeltEvent.global_event_id.asc())
+    async def _batch_collect_events(
+        self, source_urls: list[str], since_date_added: int
+    ) -> dict[str, list[GdeltEvent]]:
+        """Fetch events for all candidate source URLs in chunked batch queries.
+
+        Each chunk issues one SELECT with up to _MAX_PG_ARGS − 1 bind parameters
+        (one slot reserved for the date_added bound). Results are merged into a
+        mapping of source_url → sorted list of GdeltEvent rows.
+        """
+        if not source_urls:
+            return {}
+        dialect = (
+            self._session.bind.dialect.name if self._session.bind is not None else "postgresql"
         )
-        return list(result.scalars().all())
+        # Reserve 1 slot for the date_added parameter
+        chunk_size = (_MAX_SQLITE_ARGS - 1) if dialect == "sqlite" else (_MAX_PG_ARGS - 1)
+        events_by_url: dict[str, list[GdeltEvent]] = {url: [] for url in source_urls}
+        for start in range(0, len(source_urls), chunk_size):
+            chunk = source_urls[start : start + chunk_size]
+            result = await self._session.execute(
+                select(GdeltEvent)
+                .where(
+                    GdeltEvent.source_url.in_(chunk),
+                    GdeltEvent.date_added >= since_date_added,
+                )
+                .order_by(GdeltEvent.date_added.asc(), GdeltEvent.global_event_id.asc())
+            )
+            for event in result.scalars().all():
+                if event.source_url in events_by_url:
+                    events_by_url[event.source_url].append(event)
+        return events_by_url
 
-    async def _collect_mentions(self, event_ids: list[int]) -> list[GdeltMention]:
-        """Return all mentions associated with the given event IDs."""
-        return await self._mentions_repo.get_by_event_ids(event_ids)
+    async def _batch_collect_mentions(self, event_ids: list[int]) -> dict[int, list[GdeltMention]]:
+        """Fetch mentions for all event IDs in a single query.
 
-    async def _collect_gkg(self, mention_identifiers: list[str]) -> list[GdeltGkg]:
-        """Return all GKG rows associated with the given mention URLs."""
-        return await self._gkg_repo.get_by_document_identifiers(mention_identifiers)
+        Returns a mapping of global_event_id → list of GdeltMention rows.
+        """
+        all_mentions = await self._mentions_repo.get_by_event_ids(event_ids)
+        mentions_by_event: dict[int, list[GdeltMention]] = {}
+        for mention in all_mentions:
+            mentions_by_event.setdefault(mention.global_event_id, []).append(mention)
+        return mentions_by_event
+
+    async def _batch_collect_gkg(self, mention_identifiers: list[str]) -> dict[str, list[GdeltGkg]]:
+        """Fetch GKG rows for all mention identifier URLs in a single query.
+
+        Returns a mapping of document_identifier → list of GdeltGkg rows.
+        """
+        all_gkg = await self._gkg_repo.get_by_document_identifiers(mention_identifiers)
+        gkg_by_identifier: dict[str, list[GdeltGkg]] = {}
+        for row in all_gkg:
+            if row.document_identifier:
+                gkg_by_identifier.setdefault(row.document_identifier, []).append(row)
+        return gkg_by_identifier
 
     def _build_cluster(
         self,
@@ -178,6 +217,9 @@ class ClusterService:
             "persons": persons,
             "organizations": organizations,
             "gkg_locations": gkg_locations,
+            # gkg_doc_count tracks how many GKG documents contribute to document_tone_avg so
+            # ClusterMerger can compute a weighted mean rather than a mean-of-means after fusion
+            "gkg_doc_count": len(tones),
             "document_tone_avg": round(mean(tones), 2) if tones else None,
             "computed_at": datetime.now(UTC),
         }
@@ -187,29 +229,62 @@ class ClusterService:
 
         Filters events by ``date_added`` (GDELT YYYYMMDDHHMMSS integer) to honour
         sub-day precision — e.g. a 36-hour rolling window starting mid-day.
+
+        Uses three batch queries (one per table) across all candidates to avoid the
+        N×3 sequential round-trip pattern of the previous per-candidate loop.
         """
         since_date_added = _normalize_since_date_added(since_dt)
         try:
             candidates = await self._score_source_urls(since_date_added)
-            cluster_rows: list[dict[str, Any]] = []
+            if not candidates:
+                return 0
 
+            # ── Batch query 1: all events for all candidate source URLs ──────────
+            source_urls = [c["source_url"] for c in candidates]
+            events_by_url = await self._batch_collect_events(source_urls, since_date_added)
+
+            # ── Batch query 2: all mentions for all event IDs ────────────────────
+            all_event_ids: list[int] = [
+                event.global_event_id for url in source_urls for event in events_by_url.get(url, [])
+            ]
+            mentions_by_event = await self._batch_collect_mentions(all_event_ids)
+
+            # ── Batch query 3: all GKG rows for all mention identifier URLs ───────
+            all_mention_identifiers: list[str] = list(
+                {
+                    mention.mention_identifier
+                    for event_id in all_event_ids
+                    for mention in mentions_by_event.get(event_id, [])
+                    if mention.mention_identifier
+                }
+            )
+            gkg_by_identifier = await self._batch_collect_gkg(all_mention_identifiers)
+
+            # ── Assemble per-candidate cluster dicts (pure Python, no more I/O) ──
+            cluster_rows: list[dict[str, Any]] = []
             for candidate in candidates:
-                events = await self._collect_events(candidate["source_url"], since_date_added)
-                event_ids = [event.global_event_id for event in events]
-                mentions = await self._collect_mentions(event_ids)
-                mention_identifiers = [
-                    mention_identifier
-                    for mention_identifier in {
-                        mention.mention_identifier
-                        for mention in mentions
-                        if mention.mention_identifier
-                    }
+                url = candidate["source_url"]
+                events = events_by_url.get(url, [])
+                event_ids_for_url = [e.global_event_id for e in events]
+                mentions: list[GdeltMention] = [
+                    m for eid in event_ids_for_url for m in mentions_by_event.get(eid, [])
                 ]
-                gkg_rows = await self._collect_gkg(mention_identifiers)
+                mention_identifier_set: set[str] = {
+                    m.mention_identifier for m in mentions if m.mention_identifier
+                }
+                gkg_rows: list[GdeltGkg] = [
+                    row
+                    for identifier in mention_identifier_set
+                    for row in gkg_by_identifier.get(identifier, [])
+                ]
                 cluster_rows.append(self._build_cluster(candidate, events, mentions, gkg_rows))
 
             # ── Merge semantically related clusters ──────────────────────────────
-            merger = ClusterMerger(mention_overlap_min=1, jaccard_threshold=0.3)
+            # mention_overlap_min=2 requires at least two shared mention URLs to merge,
+            # preventing a single high-traffic news wire URL (e.g. Reuters) from fusing
+            # unrelated stories. max_themes_for_jaccard=50 and max_cluster_size=2000 are
+            # the ClusterMerger defaults and guard against O(n²) explosion and runaway merges.
+            merger = ClusterMerger(mention_overlap_min=2, jaccard_threshold=0.3)
             cluster_rows = merger.merge(cluster_rows)
 
             if not cluster_rows:

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import pytest
+
+from app.integrations.event_enrichment_mapper import compute_topic_score
 from app.services.cluster_merger import ClusterMerger, _jaccard
 
 
@@ -110,13 +113,101 @@ def test_merged_cluster_aggregates_event_ids():
     assert set(result[0]["event_ids"]) == {"1", "2", "3"}
 
 
-def test_merged_cluster_uses_highest_topic_score():
-    """Fused cluster topic_score is the max among fused source clusters."""
-    c1 = _make_cluster("c1", ["https://shared.com/x"], ["IRAN"], topic_score=5.5)
-    c2 = _make_cluster("c2", ["https://shared.com/x"], ["IRAN"], topic_score=4.2)
+def test_merged_cluster_mention_count_is_deduplicated():
+    """Fused mention_count equals the number of unique mention URLs, not the naive sum.
+
+    When two clusters share a mention URL, naively summing mention_count would double-count
+    that URL. The correct value is len(deduplicated mention_identifiers).
+    """
+    # c1 has 2 mention URLs; c2 has 2, one of which is shared with c1
+    c1 = _make_cluster(
+        "c1",
+        ["https://shared.com/x", "https://unique-a.com/y"],
+        ["IRAN"],
+        mention_count=2,
+    )
+    c2 = _make_cluster(
+        "c2",
+        ["https://shared.com/x", "https://unique-b.com/z"],
+        ["IRAN"],
+        mention_count=2,
+    )
     merger = ClusterMerger(mention_overlap_min=1, jaccard_threshold=0.3)
     result = merger.merge([c1, c2])
-    assert result[0]["topic_score"] == 5.5
+    # 3 unique URLs: shared + unique-a + unique-b
+    assert result[0]["mention_count"] == 3
+
+
+def test_merged_cluster_document_tone_weighted_by_gkg_doc_count():
+    """document_tone_avg after merge is a gkg_doc_count-weighted mean, not a mean-of-means.
+
+    A cluster with 9 GKG documents should outweigh one with 1 GKG document by 9:1.
+    """
+    c1 = _make_cluster("c1", ["https://shared.com/x"], ["IRAN"])
+    c1["document_tone_avg"] = -2.0
+    c1["gkg_doc_count"] = 9  # 9 documents
+
+    c2 = _make_cluster("c2", ["https://shared.com/x"], ["IRAN"])
+    c2["document_tone_avg"] = -10.0
+    c2["gkg_doc_count"] = 1  # 1 document
+
+    merger = ClusterMerger(mention_overlap_min=1, jaccard_threshold=0.3)
+    result = merger.merge([c1, c2])
+    # Weighted mean: (9 * -2.0 + 1 * -10.0) / 10 = -28/10 = -2.8
+    assert result[0]["document_tone_avg"] == pytest.approx(-2.8)
+
+
+def test_merged_cluster_document_tone_falls_back_to_unweighted_when_no_gkg_doc_count():
+    """When gkg_doc_count is missing/zero, document_tone_avg falls back to unweighted mean."""
+    c1 = _make_cluster("c1", ["https://shared.com/x"], ["IRAN"])
+    c1["document_tone_avg"] = -4.0
+    # no gkg_doc_count key
+
+    c2 = _make_cluster("c2", ["https://shared.com/x"], ["IRAN"])
+    c2["document_tone_avg"] = -8.0
+    # no gkg_doc_count key
+
+    merger = ClusterMerger(mention_overlap_min=1, jaccard_threshold=0.3)
+    result = merger.merge([c1, c2])
+    # Unweighted mean: (-4.0 + -8.0) / 2 = -6.0
+    assert result[0]["document_tone_avg"] == pytest.approx(-6.0)
+
+
+def test_merged_cluster_recalculates_topic_score():
+    """Fused cluster topic_score is recalculated from merged aggregates, not the pre-merge max.
+
+    The merged cluster should have a higher score than either individual cluster because
+    the combined event_count / num_articles / num_mentions / num_sources signals are larger.
+    """
+    c1 = _make_cluster(
+        "c1",
+        ["https://shared.com/x"],
+        ["IRAN"],
+        topic_score=5.5,
+        event_count=10,
+        num_articles=100,
+        num_mentions=200,
+        num_sources=20,
+    )
+    c2 = _make_cluster(
+        "c2",
+        ["https://shared.com/x"],
+        ["IRAN"],
+        topic_score=4.2,
+        event_count=8,
+        num_articles=80,
+        num_mentions=150,
+        num_sources=15,
+    )
+    merger = ClusterMerger(mention_overlap_min=1, jaccard_threshold=0.3)
+    result = merger.merge([c1, c2])
+    expected_score = compute_topic_score(
+        event_count=18,
+        num_articles=180,
+        num_mentions=350,
+        num_sources=35,
+    )
+    assert result[0]["topic_score"] == pytest.approx(expected_score)
 
 
 def test_merged_cluster_id_derived_from_highest_scoring_source():

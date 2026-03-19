@@ -59,13 +59,25 @@ class GkgRepository:
         return inserted_total
 
     async def get_by_document_identifiers(self, identifiers: list[str]) -> list[GdeltGkg]:
-        """Return GKG rows matching any of the given document_identifier URLs."""
+        """Return GKG rows matching any of the given document_identifier URLs.
+
+        Chunks the IN-list to stay below the asyncpg 32 767-parameter limit.
+        Each chunk issues one SELECT; results are concatenated in Python.
+        """
         if not identifiers:
             return []
-        result = await self._session.execute(
-            select(GdeltGkg).where(GdeltGkg.document_identifier.in_(identifiers))
+        dialect = (
+            self._session.bind.dialect.name if self._session.bind is not None else "postgresql"
         )
-        return list(result.scalars().all())
+        chunk_size = _MAX_SQLITE_ARGS if dialect == "sqlite" else _MAX_PG_ARGS
+        rows: list[GdeltGkg] = []
+        for start in range(0, len(identifiers), chunk_size):
+            chunk = identifiers[start : start + chunk_size]
+            result = await self._session.execute(
+                select(GdeltGkg).where(GdeltGkg.document_identifier.in_(chunk))
+            )
+            rows.extend(result.scalars().all())
+        return rows
 
     async def delete_before_date(self, cutoff_date: int) -> int:
         """Delete GKG rows whose date is older than cutoff_date (YYYYMMDDHHMMSS).

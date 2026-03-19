@@ -38,6 +38,7 @@ from app.integrations.anthropic_client import create_anthropic_client
 from app.scheduler.scheduler import (
     add_sync_job,
     create_scheduler,
+    trigger_cluster_job_on_startup,
     trigger_startup_ingestion_if_needed,
     trigger_sync_now,
 )
@@ -126,10 +127,12 @@ async def lifespan(app: FastAPI):
     logger.info("scheduler_started")
 
     # ── Initial sync on startup ────────────────────────────────────────────
-    # Run async to not block startup — errors are handled inside sync_job
+    # Run async to not block startup — errors are handled inside each task
     if settings.enable_metadata_sync:
         _schedule_startup_task(app, "metadata_sync", trigger_sync_now())
     _schedule_startup_task(app, "startup_ingestion", trigger_startup_ingestion_if_needed())
+    if settings.enable_cluster_materialisation:
+        _schedule_startup_task(app, "startup_cluster", trigger_cluster_job_on_startup())
 
     logger.info("application_ready")
     yield

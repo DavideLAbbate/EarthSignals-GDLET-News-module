@@ -23,6 +23,9 @@ class ClusterRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    # Keys that are used internally during cluster building/merging but are not DB columns
+    _TRANSIENT_KEYS: frozenset[str] = frozenset({"gkg_doc_count"})
+
     async def upsert(self, cluster_dict: dict[str, Any]) -> None:
         """Insert or update a story cluster row keyed by cluster_id.
 
@@ -34,6 +37,10 @@ class ClusterRepository:
         This ensures the cluster is always up-to-date after each
         materialisation run.
         """
+        # Strip transient keys that are used during pipeline processing but are
+        # not persisted as DB columns (e.g. gkg_doc_count for weighted tone avg)
+        cluster_dict = {k: v for k, v in cluster_dict.items() if k not in self._TRANSIENT_KEYS}
+
         dialect_name = (
             self._session.bind.dialect.name if self._session.bind is not None else "postgresql"
         )

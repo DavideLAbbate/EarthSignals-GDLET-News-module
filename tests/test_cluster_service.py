@@ -181,10 +181,17 @@ async def test_build_and_materialise_accepts_date_only_integer_since(db_session)
 
 
 async def test_build_and_materialise_merges_clusters_sharing_mention_url(db_session):
-    """Two source URLs sharing a mention URL must produce one cluster in DB, not two."""
+    """Two source URLs sharing at least 2 mention URLs must produce one cluster in DB, not two.
+
+    mention_overlap_min=2 requires two shared mention URLs so that a single high-traffic
+    news wire URL cannot fuse unrelated stories. This test verifies the stricter threshold.
+    """
     from app.db.models import GdeltEvent, GdeltMention
 
-    shared_mention = "https://shared-news.example.com/iran-story"
+    shared_mentions = [
+        "https://shared-news.example.com/iran-story",
+        "https://shared-wire.example.com/iran-story",
+    ]
 
     # Two source URLs each with enough signal to score >= 4.0
     # 10 events each with num_articles=500, num_mentions=500, num_sources=50
@@ -206,13 +213,15 @@ async def test_build_and_materialise_merges_clusters_sharing_mention_url(db_sess
                     num_sources=50,
                 )
             )
-            db_session.add(
-                GdeltMention(
-                    global_event_id=eid,
-                    mention_identifier=shared_mention,
-                    mention_source_name="shared-news.example.com",
+            # Each event gets both shared mentions so the pair overlap count reaches 2
+            for shared_url in shared_mentions:
+                db_session.add(
+                    GdeltMention(
+                        global_event_id=eid,
+                        mention_identifier=shared_url,
+                        mention_source_name="shared-news.example.com",
+                    )
                 )
-            )
     await db_session.flush()
 
     svc = ClusterService(db_session)

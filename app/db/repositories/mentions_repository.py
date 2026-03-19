@@ -61,13 +61,25 @@ class MentionsRepository:
         return inserted_total
 
     async def get_by_event_ids(self, event_ids: list[int]) -> list[GdeltMention]:
-        """Return all mentions for the given GDELT event IDs."""
+        """Return all mentions for the given GDELT event IDs.
+
+        Chunks the IN-list to stay below the asyncpg 32 767-parameter limit.
+        Each chunk issues one SELECT; results are concatenated in Python.
+        """
         if not event_ids:
             return []
-        result = await self._session.execute(
-            select(GdeltMention).where(GdeltMention.global_event_id.in_(event_ids))
+        dialect = (
+            self._session.bind.dialect.name if self._session.bind is not None else "postgresql"
         )
-        return list(result.scalars().all())
+        chunk_size = _MAX_SQLITE_ARGS if dialect == "sqlite" else _MAX_PG_ARGS
+        rows: list[GdeltMention] = []
+        for start in range(0, len(event_ids), chunk_size):
+            chunk = event_ids[start : start + chunk_size]
+            result = await self._session.execute(
+                select(GdeltMention).where(GdeltMention.global_event_id.in_(chunk))
+            )
+            rows.extend(result.scalars().all())
+        return rows
 
     async def delete_before_dateadded(self, cutoff_dateadded: int) -> int:
         """Delete mentions whose mention_time_date is older than cutoff_dateadded.

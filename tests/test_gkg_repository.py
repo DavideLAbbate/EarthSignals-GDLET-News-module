@@ -63,6 +63,24 @@ async def test_bulk_upsert_multiple_rows(db_session):
     assert tones["https://b.com/2"] == pytest.approx(2.0)
 
 
+async def test_get_by_document_identifiers_chunks_large_identifier_lists(db_session):
+    """get_by_document_identifiers must return all rows when the identifier list exceeds the
+    SQLite limit.
+
+    SQLite's _MAX_SQLITE_ARGS=999 means a list of 1001 identifiers crosses two chunks. All
+    rows must be returned regardless of chunking.
+    """
+    repo = GkgRepository(db_session)
+    identifiers = [f"https://chunk-test.com/{i}" for i in range(1001)]
+    rows = [{"document_identifier": ident, "themes": ["TEST"]} for ident in identifiers]
+    await repo.bulk_upsert(rows)
+
+    gkg_rows = await repo.get_by_document_identifiers(identifiers)
+    assert len(gkg_rows) == 1001
+    returned = {r.document_identifier for r in gkg_rows}
+    assert returned == set(identifiers)
+
+
 async def test_delete_before_date_removes_old_rows(db_session):
     """delete_before_date removes rows with date older than cutoff."""
     repo = GkgRepository(db_session)

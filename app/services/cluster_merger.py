@@ -7,6 +7,8 @@ from datetime import UTC, datetime
 from statistics import mean
 from typing import Any
 
+from app.integrations.event_enrichment_mapper import compute_topic_score
+
 
 # ── Union-Find ───────────────────────────────────────────────────────────────
 
@@ -64,7 +66,6 @@ _SUM_INT_FIELDS = (
     "num_articles",
     "num_mentions",
     "num_sources",
-    "mention_count",
 )
 
 _DOMINANT_FIELDS = (
@@ -204,16 +205,29 @@ class ClusterMerger:
         for field in _LIST_FIELDS:
             fused[field] = _sorted_unique_union(group, field)
 
-        # Summed integer fields
+        # Summed integer fields (events don't overlap between source URLs)
         for field in _SUM_INT_FIELDS:
             fused[field] = sum(c.get(field) or 0 for c in group)
 
-        # topic_score — max
-        fused["topic_score"] = max(c["topic_score"] for c in group)
+        # mention_count — derive from deduplicated mention_identifiers to avoid double-counting
+        # shared mention URLs that triggered the merge
+        fused["mention_count"] = len(fused["mention_identifiers"])
 
-        # Averaged float fields — mean of non-None values
+        # topic_score — recalculate from merged aggregates rather than taking max of pre-merge
+        # scores, which ignores the compounding signal of the fused cluster
+        fused["topic_score"] = compute_topic_score(
+            event_count=fused["event_count"],
+            num_articles=fused["num_articles"],
+            num_mentions=fused["num_mentions"],
+            num_sources=fused["num_sources"],
+        )
+
+        # avg_severity_score — unweighted mean (each source URL contributes one score)
         fused["avg_severity_score"] = _mean_of_non_none(group, "avg_severity_score")
-        fused["document_tone_avg"] = _mean_of_non_none(group, "document_tone_avg")
+
+        # document_tone_avg — weighted mean by gkg_doc_count to avoid mean-of-means bias
+        # when sub-clusters have different numbers of GKG documents
+        fused["document_tone_avg"] = _weighted_tone_avg(group)
 
         # Temporal boundaries
         first_times = [c["first_mention_at"] for c in group if c.get("first_mention_at")]
@@ -244,6 +258,29 @@ def _mean_of_non_none(group: list[dict[str, Any]], field: str) -> float | None:
     if not values:
         return None
     return round(mean(values), 2)
+
+
+def _weighted_tone_avg(group: list[dict[str, Any]]) -> float | None:
+    """Return a document-count-weighted mean of document_tone_avg across the group.
+
+    Weights each sub-cluster's average by its ``gkg_doc_count`` so that larger
+    sub-clusters (more GKG documents) contribute proportionally more to the fused
+    tone, avoiding the mean-of-means statistical bias when groups differ in size.
+
+    Falls back to an unweighted mean when no weight information is available.
+    """
+    pairs = [
+        (c["document_tone_avg"], c.get("gkg_doc_count") or 0)
+        for c in group
+        if c.get("document_tone_avg") is not None
+    ]
+    if not pairs:
+        return None
+    total_weight = sum(w for _, w in pairs)
+    if total_weight == 0:
+        # No weight info — fall back to unweighted mean
+        return round(mean(v for v, _ in pairs), 2)
+    return round(sum(v * w for v, w in pairs) / total_weight, 2)
 
 
 def _top_values(values: list[str], limit: int = 5) -> list[str]:

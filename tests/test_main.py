@@ -33,6 +33,10 @@ async def test_lifespan_schedules_metadata_sync_and_bootstrap_tasks():
             "app.main.trigger_startup_ingestion_if_needed",
             new_callable=AsyncMock,
         ) as trigger_startup_ingestion_if_needed,
+        unittest.mock.patch(
+            "app.main.trigger_cluster_job_on_startup",
+            new_callable=AsyncMock,
+        ) as trigger_cluster_job_on_startup,
         unittest.mock.patch("app.main._schedule_startup_task") as schedule_startup_task,
         unittest.mock.patch("app.main._shutdown_startup_tasks", new_callable=AsyncMock),
         unittest.mock.patch("app.main.dispose_engine", new_callable=AsyncMock),
@@ -48,9 +52,10 @@ async def test_lifespan_schedules_metadata_sync_and_bootstrap_tasks():
         async with lifespan(app):
             pass
 
-    assert scheduled_tasks == ["metadata_sync", "startup_ingestion"]
+    assert scheduled_tasks == ["metadata_sync", "startup_ingestion", "startup_cluster"]
     trigger_sync_now.assert_called_once_with()
     trigger_startup_ingestion_if_needed.assert_called_once_with()
+    trigger_cluster_job_on_startup.assert_called_once_with()
 
 
 @pytest.mark.asyncio
@@ -77,6 +82,10 @@ async def test_lifespan_skips_startup_sync_when_disabled():
             "app.main.trigger_startup_ingestion_if_needed",
             new_callable=AsyncMock,
         ) as trigger_startup_ingestion_if_needed,
+        unittest.mock.patch(
+            "app.main.trigger_cluster_job_on_startup",
+            new_callable=AsyncMock,
+        ) as trigger_cluster_job_on_startup,
         unittest.mock.patch("app.main._schedule_startup_task") as schedule_startup_task,
         unittest.mock.patch("app.main._shutdown_startup_tasks", new_callable=AsyncMock),
         unittest.mock.patch("app.main.dispose_engine", new_callable=AsyncMock),
@@ -93,9 +102,10 @@ async def test_lifespan_skips_startup_sync_when_disabled():
         async with lifespan(app):
             pass
 
-    assert scheduled_tasks == ["startup_ingestion"]
+    assert scheduled_tasks == ["startup_ingestion", "startup_cluster"]
     trigger_sync_now.assert_not_called()
     trigger_startup_ingestion_if_needed.assert_called_once_with()
+    trigger_cluster_job_on_startup.assert_called_once_with()
 
 
 @pytest.mark.asyncio
@@ -120,6 +130,10 @@ async def test_lifespan_does_not_schedule_extra_startup_task_for_event_enrichmen
             "app.main.trigger_startup_ingestion_if_needed",
             new_callable=AsyncMock,
         ),
+        unittest.mock.patch(
+            "app.main.trigger_cluster_job_on_startup",
+            new_callable=AsyncMock,
+        ),
         unittest.mock.patch("app.main._schedule_startup_task") as schedule_startup_task,
         unittest.mock.patch("app.main._shutdown_startup_tasks", new_callable=AsyncMock),
         unittest.mock.patch("app.main.dispose_engine", new_callable=AsyncMock),
@@ -138,7 +152,7 @@ async def test_lifespan_does_not_schedule_extra_startup_task_for_event_enrichmen
             pass
 
     add_sync_job.assert_called_once_with(scheduler)
-    assert scheduled_tasks == ["metadata_sync", "startup_ingestion"]
+    assert scheduled_tasks == ["metadata_sync", "startup_ingestion", "startup_cluster"]
 
 
 @pytest.mark.asyncio

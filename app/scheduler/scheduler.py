@@ -167,6 +167,18 @@ async def trigger_startup_ingestion_if_needed() -> None:
         await run_bootstrap(session)
 
 
+async def trigger_cluster_job_on_startup() -> None:
+    """Run one cluster materialisation pass on startup so clusters are available immediately.
+
+    Without this trigger the first cluster appears only after the first scheduled
+    interval fires (up to 24 hours after deploy on a fresh instance).
+    """
+    session_factory = _get_session_factory()
+    logger.info("startup_cluster_triggered")
+    count = await run_cluster_job(session_factory)
+    logger.info("startup_cluster_completed", count=count)
+
+
 async def run_ingestion_job(
     session_factory: async_sessionmaker[AsyncSession],
     job_type: str = "incremental",

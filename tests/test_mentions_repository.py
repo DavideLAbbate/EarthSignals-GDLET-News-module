@@ -67,6 +67,27 @@ async def test_get_by_event_ids_multiple_events(db_session):
     assert 2003 not in ids
 
 
+async def test_get_by_event_ids_chunks_large_id_lists(db_session):
+    """get_by_event_ids must return all rows even when the ID list exceeds the SQLite limit.
+
+    SQLite's _MAX_SQLITE_ARGS=999 means a list of 1001 IDs crosses two chunks. All rows
+    must be returned regardless of chunking.
+    """
+    repo = MentionsRepository(db_session)
+    # Insert 1001 distinct event IDs — all with unique mention identifiers
+    event_ids = list(range(5000, 6001))  # 1001 IDs
+    rows = [
+        {"global_event_id": eid, "mention_identifier": f"https://chunk-test.com/{eid}"}
+        for eid in event_ids
+    ]
+    await repo.bulk_upsert(rows)
+
+    mentions = await repo.get_by_event_ids(event_ids)
+    assert len(mentions) == 1001
+    returned_ids = {m.global_event_id for m in mentions}
+    assert returned_ids == set(event_ids)
+
+
 async def test_delete_before_dateadded_removes_old_rows(db_session):
     """delete_before_dateadded removes rows older than the cutoff."""
     repo = MentionsRepository(db_session)
