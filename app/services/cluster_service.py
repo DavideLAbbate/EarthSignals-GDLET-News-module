@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections import Counter
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -41,8 +42,18 @@ class ClusterService:
         self._gkg_repo = GkgRepository(session)
         self._cluster_repo = ClusterRepository(session)
 
-    async def _score_source_urls(self, since_date_added: int) -> list[dict[str, Any]]:
+    async def _score_source_urls(
+        self,
+        since_date_added: int,
+        until_date_added: int | None = None,
+    ) -> list[dict[str, Any]]:
         """Return candidate source URLs and their aggregated topic scores."""
+        filters = [
+            GdeltEvent.date_added >= since_date_added,
+            GdeltEvent.source_url.is_not(None),
+        ]
+        if until_date_added is not None:
+            filters.append(GdeltEvent.date_added <= until_date_added)
         stmt = (
             select(
                 GdeltEvent.source_url,
@@ -51,10 +62,7 @@ class ClusterService:
                 func.coalesce(func.sum(GdeltEvent.num_mentions), 0).label("num_mentions"),
                 func.coalesce(func.sum(GdeltEvent.num_sources), 0).label("num_sources"),
             )
-            .where(
-                GdeltEvent.date_added >= since_date_added,
-                GdeltEvent.source_url.is_not(None),
-            )
+            .where(*filters)
             .group_by(GdeltEvent.source_url)
         )
         result = await self._session.execute(stmt)
@@ -86,7 +94,10 @@ class ClusterService:
         return candidates
 
     async def _batch_collect_events(
-        self, source_urls: list[str], since_date_added: int
+        self,
+        source_urls: list[str],
+        since_date_added: int,
+        until_date_added: int | None = None,
     ) -> dict[str, list[GdeltEvent]]:
         """Fetch events for all candidate source URLs in chunked batch queries.
 
@@ -99,17 +110,25 @@ class ClusterService:
         dialect = (
             self._session.bind.dialect.name if self._session.bind is not None else "postgresql"
         )
-        # Reserve 1 slot for the date_added parameter
-        chunk_size = (_MAX_SQLITE_ARGS - 1) if dialect == "sqlite" else (_MAX_PG_ARGS - 1)
+        # Reserve 1 slot for the date_added parameter (2 if until bound is present)
+        slots_reserved = 2 if until_date_added is not None else 1
+        chunk_size = (
+            (_MAX_SQLITE_ARGS - slots_reserved)
+            if dialect == "sqlite"
+            else (_MAX_PG_ARGS - slots_reserved)
+        )
         events_by_url: dict[str, list[GdeltEvent]] = {url: [] for url in source_urls}
         for start in range(0, len(source_urls), chunk_size):
             chunk = source_urls[start : start + chunk_size]
+            filters = [
+                GdeltEvent.source_url.in_(chunk),
+                GdeltEvent.date_added >= since_date_added,
+            ]
+            if until_date_added is not None:
+                filters.append(GdeltEvent.date_added <= until_date_added)
             result = await self._session.execute(
                 select(GdeltEvent)
-                .where(
-                    GdeltEvent.source_url.in_(chunk),
-                    GdeltEvent.date_added >= since_date_added,
-                )
+                .where(*filters)
                 .order_by(GdeltEvent.date_added.asc(), GdeltEvent.global_event_id.asc())
             )
             for event in result.scalars().all():
@@ -149,7 +168,11 @@ class ClusterService:
     ) -> dict[str, Any]:
         """Build a single materialised cluster row."""
         source_url = doc["source_url"]
-        cluster_id = f"{datetime.now(UTC):%Y%m%d}_{sha256(source_url.encode()).hexdigest()[:12]}"
+        # cluster_id must be stable across runs: keyed solely on source_url so that
+        # the same story is always upserted into the same row regardless of which day
+        # the pipeline runs. A date prefix would produce a new cluster_id at midnight,
+        # leaving the previous day's row stale and orphaned.
+        cluster_id = sha256(source_url.encode()).hexdigest()[:24]
 
         event_ids = [str(event.global_event_id) for event in events]
         event_type_labels = [
@@ -162,15 +185,12 @@ class ClusterService:
             compute_severity_score(event.quad_class, event.goldstein_scale, event.avg_tone)
             for event in events
         ]
+        # Use only action_geo_country_code (FIPS 2-char) to avoid mixing standards:
+        # actor1/2_country_code are CAMEO/ISO-3 (3-char) while action_geo_country_code
+        # is FIPS (2-char). Combining them causes the same country to be counted separately
+        # ("US" vs "USA") and breaks country-code filtering in the clusters API.
         country_values = [
-            value
-            for event in events
-            for value in (
-                event.action_geo_country_code,
-                event.actor1_country_code,
-                event.actor2_country_code,
-            )
-            if value
+            event.action_geo_country_code for event in events if event.action_geo_country_code
         ]
         location_values = [
             event.action_geo_full_name for event in events if event.action_geo_full_name
@@ -224,30 +244,63 @@ class ClusterService:
             "computed_at": datetime.now(UTC),
         }
 
-    async def build_and_materialise(self, since_dt: datetime | int) -> int:
+    async def build_and_materialise(
+        self,
+        since_dt: datetime | int,
+        until_dt: datetime | int | None = None,
+    ) -> int:
         """Build and persist story clusters for candidate source URLs.
 
         Filters events by ``date_added`` (GDELT YYYYMMDDHHMMSS integer) to honour
         sub-day precision — e.g. a 36-hour rolling window starting mid-day.
 
+        ``until_dt`` is optional. When provided, only events within the closed
+        [since_dt, until_dt] window are considered. Useful for backfill runs that
+        need to process a fixed slice without bleeding into later data.
+
         Uses three batch queries (one per table) across all candidates to avoid the
         N×3 sequential round-trip pattern of the previous per-candidate loop.
         """
         since_date_added = _normalize_since_date_added(since_dt)
+        until_date_added = _normalize_since_date_added(until_dt) if until_dt is not None else None
+        t0 = time.monotonic()
         try:
-            candidates = await self._score_source_urls(since_date_added)
+            candidates = await self._score_source_urls(since_date_added, until_date_added)
             if not candidates:
                 return 0
 
+            t_score = time.monotonic()
+            logger.info(
+                "cluster_phase_score",
+                candidates=len(candidates),
+                elapsed_s=round(t_score - t0, 2),
+            )
+
             # ── Batch query 1: all events for all candidate source URLs ──────────
             source_urls = [c["source_url"] for c in candidates]
-            events_by_url = await self._batch_collect_events(source_urls, since_date_added)
+            events_by_url = await self._batch_collect_events(
+                source_urls, since_date_added, until_date_added
+            )
+            total_events = sum(len(v) for v in events_by_url.values())
+            t_events = time.monotonic()
+            logger.info(
+                "cluster_phase_events",
+                total_events=total_events,
+                elapsed_s=round(t_events - t_score, 2),
+            )
 
             # ── Batch query 2: all mentions for all event IDs ────────────────────
             all_event_ids: list[int] = [
                 event.global_event_id for url in source_urls for event in events_by_url.get(url, [])
             ]
             mentions_by_event = await self._batch_collect_mentions(all_event_ids)
+            total_mentions = sum(len(v) for v in mentions_by_event.values())
+            t_mentions = time.monotonic()
+            logger.info(
+                "cluster_phase_mentions",
+                total_mentions=total_mentions,
+                elapsed_s=round(t_mentions - t_events, 2),
+            )
 
             # ── Batch query 3: all GKG rows for all mention identifier URLs ───────
             all_mention_identifiers: list[str] = list(
@@ -259,6 +312,14 @@ class ClusterService:
                 }
             )
             gkg_by_identifier = await self._batch_collect_gkg(all_mention_identifiers)
+            total_gkg = sum(len(v) for v in gkg_by_identifier.values())
+            t_gkg = time.monotonic()
+            logger.info(
+                "cluster_phase_gkg",
+                unique_identifiers=len(all_mention_identifiers),
+                total_gkg=total_gkg,
+                elapsed_s=round(t_gkg - t_mentions, 2),
+            )
 
             # ── Assemble per-candidate cluster dicts (pure Python, no more I/O) ──
             cluster_rows: list[dict[str, Any]] = []
@@ -278,6 +339,12 @@ class ClusterService:
                     for row in gkg_by_identifier.get(identifier, [])
                 ]
                 cluster_rows.append(self._build_cluster(candidate, events, mentions, gkg_rows))
+            t_build = time.monotonic()
+            logger.info(
+                "cluster_phase_build",
+                cluster_rows=len(cluster_rows),
+                elapsed_s=round(t_build - t_gkg, 2),
+            )
 
             # ── Merge semantically related clusters ──────────────────────────────
             # mention_overlap_min=2 requires at least two shared mention URLs to merge,
@@ -286,12 +353,25 @@ class ClusterService:
             # the ClusterMerger defaults and guard against O(n²) explosion and runaway merges.
             merger = ClusterMerger(mention_overlap_min=2, jaccard_threshold=0.3)
             cluster_rows = merger.merge(cluster_rows)
+            t_merge = time.monotonic()
+            logger.info(
+                "cluster_phase_merge",
+                merged_rows=len(cluster_rows),
+                elapsed_s=round(t_merge - t_build, 2),
+            )
 
             if not cluster_rows:
                 return 0
 
             inserted = await self._cluster_repo.bulk_upsert(cluster_rows)
-            logger.info("clusters_materialised", count=inserted, since_date_added=since_date_added)
+            t_upsert = time.monotonic()
+            logger.info(
+                "clusters_materialised",
+                count=inserted,
+                since_date_added=since_date_added,
+                elapsed_s=round(t_upsert - t_merge, 2),
+                total_elapsed_s=round(t_upsert - t0, 2),
+            )
             return inserted
         except Exception as exc:  # pragma: no cover - covered via raised domain error
             raise ClusterBuildError("Failed to build story clusters", detail=str(exc)) from exc

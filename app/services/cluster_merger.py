@@ -85,11 +85,17 @@ class ClusterMerger:
         jaccard_threshold: float = 0.3,
         max_themes_for_jaccard: int | None = 50,
         max_cluster_size: int | None = 2000,
+        max_theme_df: float = 0.2,
     ) -> None:
         self._mention_overlap_min = mention_overlap_min
         self._jaccard_threshold = jaccard_threshold
         self._max_themes_for_jaccard = max_themes_for_jaccard
         self._max_cluster_size = max_cluster_size
+        # max_theme_df: themes that appear in more than this fraction of all clusters
+        # are excluded from the inverted index. A theme shared by 20%+ of clusters
+        # (e.g. "UNITED_STATES", "ECONOMY") carries no discriminative signal and
+        # would generate O(n²) candidate pairs on its own, defeating the index.
+        self._max_theme_df = max_theme_df
 
     def merge(self, clusters: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Merge related clusters into fused representations.
@@ -100,18 +106,28 @@ class ClusterMerger:
             return []
 
         uf = _UnionFind(len(clusters))
-        self._union_by_mention_overlap(clusters, uf)
-        self._union_by_theme_jaccard(clusters, uf)
+        # component_sizes tracks the total event_count per Union-Find root so that
+        # _would_exceed_size_cap can answer in O(α) instead of O(n) per call.
+        component_sizes = [c.get("event_count") or 0 for c in clusters]
+        self._union_by_mention_overlap(clusters, uf, component_sizes)
+        self._union_by_theme_jaccard(clusters, uf, component_sizes)
 
         components = self._collect_components(clusters, uf)
         return [self._fuse(group) for group in components.values()]
 
     # ── graph construction ───────────────────────────────────────────────────
 
-    def _union_by_mention_overlap(self, clusters: list[dict[str, Any]], uf: _UnionFind) -> None:
+    def _union_by_mention_overlap(
+        self,
+        clusters: list[dict[str, Any]],
+        uf: _UnionFind,
+        component_sizes: list[int],
+    ) -> None:
         """Union pairs of clusters whose shared mention URL count >= mention_overlap_min.
 
         Skips the union if the resulting component would exceed max_cluster_size.
+        component_sizes is mutated in-place to track per-root event_count sums so that
+        size checks remain O(α) rather than O(n).
         """
         url_to_indices: dict[str, list[int]] = defaultdict(list)
         for i, cluster in enumerate(clusters):
@@ -127,50 +143,104 @@ class ClusterMerger:
 
         for (i, j), count in pair_overlap.items():
             if count >= self._mention_overlap_min:
-                if self._would_exceed_size_cap(clusters, uf, i, j):
+                if self._would_exceed_size_cap(uf, component_sizes, i, j):
                     continue
-                uf.union(i, j)
+                self._union_and_update_sizes(uf, component_sizes, i, j)
 
-    def _union_by_theme_jaccard(self, clusters: list[dict[str, Any]], uf: _UnionFind) -> None:
+    def _union_by_theme_jaccard(
+        self,
+        clusters: list[dict[str, Any]],
+        uf: _UnionFind,
+        component_sizes: list[int],
+    ) -> None:
         """Union pairs not yet connected whose theme Jaccard >= jaccard_threshold.
+
+        Uses an inverted index on themes to build only the candidate pairs that share
+        at least one theme, reducing the comparison set from O(n²) to O(k) where k is
+        the number of co-occurring theme pairs — typically much smaller than n²/2 for
+        real news data with sparse theme overlap.
 
         Each cluster's theme set is truncated to max_themes_for_jaccard items before
         computing similarity, preventing clusters with thousands of generic tags from
         generating spurious high-Jaccard matches.
         Skips the union if the resulting component would exceed max_cluster_size.
+        component_sizes is mutated in-place for O(α) size checks.
         """
-        n = len(clusters)
         cap = self._max_themes_for_jaccard
         if cap is None:
             theme_sets = [set(c.get("themes") or []) for c in clusters]
         else:
             theme_sets = [set(list(c.get("themes") or [])[:cap]) for c in clusters]
 
-        for i in range(n):
-            for j in range(i + 1, n):
-                if uf.find(i) == uf.find(j):
-                    continue  # already merged — skip expensive Jaccard check
-                if _jaccard(theme_sets[i], theme_sets[j]) > self._jaccard_threshold:
-                    if self._would_exceed_size_cap(clusters, uf, i, j):
-                        continue
-                    uf.union(i, j)
+        # Build an inverted index: theme → list of cluster indices that have it.
+        # Themes that appear in more than max_theme_df of all clusters are excluded:
+        # they carry no discriminative signal (like stopwords in IR) and would each
+        # generate O(n²) candidate pairs, negating the benefit of the inverted index.
+        n = len(clusters)
+        # Minimum 2: a theme shared by only 1 cluster can never form a pair.
+        # The percentage floor only kicks in when n is large enough that even
+        # max_theme_df% of clusters produces a meaningful pair explosion.
+        df_limit = max(2, int(n * self._max_theme_df))
+        theme_to_indices: dict[str, list[int]] = defaultdict(list)
+        for i, ts in enumerate(theme_sets):
+            for theme in ts:
+                theme_to_indices[theme].append(i)
+
+        # Collect candidate pairs (i, j) that share at least one non-stopword theme.
+        # Using a set avoids evaluating the same pair twice.
+        candidate_pairs: set[tuple[int, int]] = set()
+        for theme, indices in theme_to_indices.items():
+            if len(indices) > df_limit:
+                continue  # high-frequency theme — skip to avoid O(n²) explosion
+            for a in range(len(indices)):
+                for b in range(a + 1, len(indices)):
+                    candidate_pairs.add((min(indices[a], indices[b]), max(indices[a], indices[b])))
+
+        for i, j in candidate_pairs:
+            if uf.find(i) == uf.find(j):
+                continue  # already merged — skip Jaccard check
+            if _jaccard(theme_sets[i], theme_sets[j]) > self._jaccard_threshold:
+                if self._would_exceed_size_cap(uf, component_sizes, i, j):
+                    continue
+                self._union_and_update_sizes(uf, component_sizes, i, j)
 
     def _would_exceed_size_cap(
-        self, clusters: list[dict[str, Any]], uf: _UnionFind, i: int, j: int
+        self,
+        uf: _UnionFind,
+        component_sizes: list[int],
+        i: int,
+        j: int,
     ) -> bool:
-        """Return True if merging the components of i and j would exceed max_cluster_size."""
+        """Return True if merging the components of i and j would exceed max_cluster_size.
+
+        O(α) — reads pre-aggregated sizes indexed by Union-Find root.
+        """
         if self._max_cluster_size is None:
             return False
         ri, rj = uf.find(i), uf.find(j)
         if ri == rj:
             return False
-        size_i = sum(
-            c.get("event_count") or 0 for idx, c in enumerate(clusters) if uf.find(idx) == ri
-        )
-        size_j = sum(
-            c.get("event_count") or 0 for idx, c in enumerate(clusters) if uf.find(idx) == rj
-        )
-        return (size_i + size_j) > self._max_cluster_size
+        return (component_sizes[ri] + component_sizes[rj]) > self._max_cluster_size
+
+    def _union_and_update_sizes(
+        self,
+        uf: _UnionFind,
+        component_sizes: list[int],
+        i: int,
+        j: int,
+    ) -> None:
+        """Merge components i and j and update the root's size entry.
+
+        Must be called instead of uf.union directly so component_sizes stays consistent.
+        """
+        ri, rj = uf.find(i), uf.find(j)
+        if ri == rj:
+            return
+        merged_size = component_sizes[ri] + component_sizes[rj]
+        uf.union(i, j)
+        # After union, one root absorbs the other; update whichever is now the root.
+        new_root = uf.find(i)
+        component_sizes[new_root] = merged_size
 
     # ── component extraction ─────────────────────────────────────────────────
 

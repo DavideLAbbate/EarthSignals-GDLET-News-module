@@ -63,13 +63,17 @@ def compute_severity_score(
     """Compute a severity score in [0, 20] for a single event.
 
     Formula:
-        severity = quad_weight + abs(goldstein_scale) * 0.5 + abs(avg_tone) * 0.3
+        severity = quad_weight + max(0, -goldstein_scale) * 0.5 + abs(avg_tone) * 0.3
+
+    A negative Goldstein scale (conflict, coercion) increases severity; a positive
+    scale (cooperation, peace) contributes zero — using abs() would wrongly treat a
+    peace treaty (+10) with the same weight as a bombardment (-10).
 
     quad_weight mapping: {1: 0.0, 2: 2.0, 3: 5.0, 4: 10.0}
     Result is capped at 20.0 and rounded to 2 decimal places.
     """
     quad_weight = {1: 0.0, 2: 2.0, 3: 5.0, 4: 10.0}.get(quad_class or 0, 0.0)
-    raw = quad_weight + abs(goldstein_scale or 0.0) * 0.5 + abs(avg_tone or 0.0) * 0.3
+    raw = quad_weight + max(0.0, -(goldstein_scale or 0.0)) * 0.5 + abs(avg_tone or 0.0) * 0.3
     return round(min(raw, 20.0), 2)
 
 

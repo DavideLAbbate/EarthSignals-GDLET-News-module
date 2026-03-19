@@ -65,7 +65,7 @@ async def test_search_returns_ordered_by_score_desc(db_session):
     await db_session.commit()
 
     clusters, _ = await repo.search()
-    scores = [c.topic_score for c in clusters]
+    scores = [c.topic_score for c in clusters if c.topic_score is not None]
     assert scores == sorted(scores, reverse=True)
 
 
@@ -93,6 +93,46 @@ async def test_search_total_count_reflects_all_rows(db_session):
 
     _, total = await repo.search(limit=2, offset=0)
     assert total >= 5
+
+
+async def test_search_filters_by_country_code_sql(db_session):
+    """search(country_code=X) must return only clusters whose dominant_countries contains X.
+
+    The filter is applied in SQL (not Python-side), so clusters without the country
+    must be excluded even when the table has many rows.
+    """
+    repo = ClusterRepository(db_session)
+    await repo.bulk_upsert(
+        [
+            _make_cluster("match", 7.0, ["US", "IR"]),
+            _make_cluster("no_match", 8.0, ["FR", "DE"]),
+            _make_cluster("no_countries", 6.0, []),
+        ]
+    )
+    await db_session.commit()
+
+    clusters, total = await repo.search(country_code="US")
+    ids = [c.cluster_id for c in clusters]
+    assert "match" in ids
+    assert "no_match" not in ids
+    assert "no_countries" not in ids
+    assert total == 1
+
+
+async def test_search_country_code_total_reflects_sql_filter(db_session):
+    """total returned with country_code filter equals rows matching in DB, not all rows."""
+    repo = ClusterRepository(db_session)
+    await repo.bulk_upsert(
+        [
+            _make_cluster("ir1", 5.0, ["IR"]),
+            _make_cluster("ir2", 4.0, ["IR"]),
+            _make_cluster("us1", 3.0, ["US"]),
+        ]
+    )
+    await db_session.commit()
+
+    _, total = await repo.search(country_code="IR")
+    assert total == 2
 
 
 async def test_delete_computed_before_removes_old_clusters(db_session):

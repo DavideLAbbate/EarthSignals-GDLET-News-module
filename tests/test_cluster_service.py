@@ -12,11 +12,18 @@ from app.db.models import GdeltEvent, GdeltGkg, GdeltMention, StoryCluster
 from app.services.cluster_service import ClusterService
 
 
+# cluster_id is now solely a 24-hex-char SHA-256 prefix of the source_url,
+# with no date prefix, so the same URL always maps to the same row.
+def _expected_cluster_id(source_url: str) -> str:
+    return sha256(source_url.encode()).hexdigest()[:24]
+
+
 def _make_event(
     global_event_id: int,
     *,
     source_url: str = "https://example.com/story",
     sql_date: int = 20260310,
+    date_added: int | None = None,
     event_root_code: str = "19",
     quad_class: int = 4,
     goldstein_scale: float = -10.0,
@@ -32,7 +39,7 @@ def _make_event(
     return GdeltEvent(
         global_event_id=global_event_id,
         sql_date=sql_date,
-        date_added=20260310010101 + global_event_id,
+        date_added=date_added if date_added is not None else 20260310010101 + global_event_id,
         source_url=source_url,
         event_code=event_root_code + "0",
         event_base_code=event_root_code,
@@ -105,10 +112,7 @@ async def test_build_and_materialise_creates_story_cluster(db_session) -> None:
     assert len(clusters) == 1
 
     cluster = clusters[0]
-    expected_cluster_id = (
-        f"{datetime.now(UTC):%Y%m%d}_{sha256(source_url.encode()).hexdigest()[:12]}"
-    )
-    assert cluster.cluster_id == expected_cluster_id
+    assert cluster.cluster_id == _expected_cluster_id(source_url)
     assert cluster.event_count == 2
     assert cluster.num_articles == 1000
     assert cluster.num_mentions == 1000
@@ -237,6 +241,49 @@ async def test_build_and_materialise_merges_clusters_sharing_mention_url(db_sess
     assert len(clusters) == 1
     # Fused cluster must contain event_ids from both source URLs (20 total)
     assert len(clusters[0].event_ids) == 20
+
+
+async def test_build_and_materialise_respects_until_dt(db_session):
+    """Events after until_dt must be excluded from cluster materialisation.
+
+    Two events for the same source URL: one inside the window, one outside.
+    With until_dt set to exclude the second event, the cluster must be built
+    from only the first event — and the second source URL must not appear.
+    """
+    db_session.add(
+        _make_event(
+            7000001,
+            source_url="https://inside.example.com/story",
+            date_added=20260313060000,
+            num_articles=500,
+            num_mentions=500,
+            num_sources=100,
+        )
+    )
+    db_session.add(
+        _make_event(
+            7000002,
+            source_url="https://outside.example.com/story",
+            date_added=20260314180000,  # after until bound
+            num_articles=500,
+            num_mentions=500,
+            num_sources=100,
+        )
+    )
+    await db_session.flush()
+
+    count = await ClusterService(db_session).build_and_materialise(
+        20260313000000,
+        20260314120000,  # until: 14 mar 12:00 — excludes the second event
+    )
+    assert count >= 1
+
+    from sqlalchemy import select as sa_select
+
+    clusters = (await db_session.execute(sa_select(StoryCluster))).scalars().all()
+    source_urls = {c.source_url for c in clusters}
+    assert "https://inside.example.com/story" in source_urls
+    assert "https://outside.example.com/story" not in source_urls
 
 
 async def test_score_source_urls_excludes_candidates_between_0_5_and_4(db_session):

@@ -307,6 +307,50 @@ def test_jaccard_still_merges_small_theme_sets_under_cap():
     assert len(result) == 1
 
 
+# ── max_theme_df ─────────────────────────────────────────────────────────────
+
+
+def test_high_frequency_theme_does_not_prevent_merge_for_small_inputs():
+    """With only 2 clusters, a shared theme must not be filtered out by the df cap.
+
+    df_limit = max(2, int(2 * 0.2)) = 2, so a theme shared by exactly 2 clusters
+    is at the boundary and must still form a candidate pair.
+    """
+    c1 = _make_cluster("c1", ["https://url-a.com/1"], ["IRAN", "WAR", "OIL"])
+    c2 = _make_cluster("c2", ["https://url-b.com/2"], ["IRAN", "WAR", "SANCTIONS"])
+    merger = ClusterMerger(mention_overlap_min=1, jaccard_threshold=0.3, max_theme_df=0.2)
+    result = merger.merge([c1, c2])
+    assert len(result) == 1
+
+
+def test_high_frequency_theme_is_excluded_from_index_with_many_clusters():
+    """A theme shared by more than max_theme_df of clusters must be excluded from the index.
+
+    With 10 clusters and max_theme_df=0.2 → df_limit = max(2, int(10*0.2)) = 2.
+    A theme shared by 3+ clusters is excluded; only themes shared by ≤2 clusters
+    form candidate pairs. Two clusters that share ONLY the high-frequency theme
+    must NOT be fused via Jaccard (they may still fuse via mention overlap).
+    """
+    # c1..c8: share "COMMON_THEME" among all 10, plus a unique theme each
+    # c9 and c10: share only "COMMON_THEME" — should NOT fuse via Jaccard
+    clusters = [
+        _make_cluster(f"c{i}", [f"https://unique-{i}.com/"], ["COMMON_THEME", f"UNIQUE_{i}"])
+        for i in range(8)
+    ]
+    c_a = _make_cluster("ca", ["https://ca.com/"], ["COMMON_THEME"])
+    c_b = _make_cluster("cb", ["https://cb.com/"], ["COMMON_THEME"])
+    merger = ClusterMerger(
+        mention_overlap_min=2,  # disable mention overlap (each URL is unique)
+        jaccard_threshold=0.3,
+        max_theme_df=0.2,
+    )
+    result = merger.merge(clusters + [c_a, c_b])
+    # ca and cb share only COMMON_THEME which is excluded → must remain separate
+    result_ids = {c["cluster_id"] for c in result}
+    assert "ca" in result_ids
+    assert "cb" in result_ids
+
+
 # ── max_cluster_size ──────────────────────────────────────────────────────────
 
 

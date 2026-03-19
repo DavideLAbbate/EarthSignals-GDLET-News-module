@@ -14,6 +14,16 @@ def test_migration_009_creates_source_url_index_on_gdelt_events() -> None:
     assert "create_index" in content
 
 
+def test_migration_010_creates_gin_index_on_dominant_countries() -> None:
+    """Migration 010 must add a GIN index on story_clusters.dominant_countries."""
+    content = Path("alembic/versions/010_add_gin_index_dominant_countries.py").read_text(
+        encoding="utf-8"
+    )
+    assert "ix_story_clusters_dominant_countries_gin" in content
+    assert "dominant_countries" in content
+    assert "gin" in content.lower()
+
+
 def test_sqlite_compatible_migrations_avoid_raw_op_alter_column() -> None:
     """SQLite-targeted verification should not rely on raw op.alter_column in migrations."""
     migration_paths = [

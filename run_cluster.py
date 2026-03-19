@@ -30,9 +30,10 @@ from app.services.cluster_service import ClusterService  # noqa: E402
 
 async def main():
     since = int(sys.argv[1]) if len(sys.argv) > 1 else 20260308
+    until = int(sys.argv[2]) if len(sys.argv) > 2 else None
     factory = _get_session_factory()
     async with factory() as session:
-        count = await ClusterService(session).build_and_materialise(since)
+        count = await ClusterService(session).build_and_materialise(since, until)
         await session.commit()
         print(f"Materialised {count} clusters")
 
