@@ -7,6 +7,11 @@ A GIN index on the jsonb_path_ops operator class allows index-only scans for the
 
 SQLite (used in tests) does not support GIN indexes; the migration is a no-op there.
 
+Note: CREATE INDEX CONCURRENTLY cannot run inside a transaction block (which Alembic
+uses by default), so this migration uses a plain CREATE INDEX instead. CONCURRENTLY
+is only needed when the table has live traffic during migration; for an initial deploy
+the regular form is correct and transactionally safe.
+
 Revision ID: 010
 Revises: 009
 Create Date: 2026-03-19
@@ -23,8 +28,11 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # Plain CREATE INDEX (no CONCURRENTLY) so it can run inside Alembic's
+    # default transaction block. Safe for initial deploy; the table lock is
+    # brief on an empty or small table.
     op.execute(
-        "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
+        "CREATE INDEX IF NOT EXISTS "
         "ix_story_clusters_dominant_countries_gin "
         "ON story_clusters USING gin "
         "((dominant_countries::jsonb) jsonb_path_ops)"

@@ -57,6 +57,8 @@ def _make_cluster(cluster_id: str, mention_ids: list[str], themes: list[str], **
         "gkg_locations": [],
         "document_tone_avg": None,
         "computed_at": None,
+        "event_date_ref_start": kwargs.get("event_date_ref_start", None),
+        "event_date_ref_end": kwargs.get("event_date_ref_end", None),
     }
 
 
@@ -351,45 +353,259 @@ def test_high_frequency_theme_is_excluded_from_index_with_many_clusters():
     assert "cb" in result_ids
 
 
-# ── max_cluster_size ──────────────────────────────────────────────────────────
+# ── no size cap ───────────────────────────────────────────────────────────────
 
 
-def test_merge_blocked_when_result_exceeds_max_cluster_size():
-    """A merge that would produce a cluster exceeding max_cluster_size must be skipped."""
-    # c1 already has 1500 events; fusing with c2 (600) would give 2100 > 2000
-    c1 = _make_cluster("c1", ["https://shared.com/x"], ["IRAN"], event_count=1500)
-    c2 = _make_cluster("c2", ["https://shared.com/x"], ["IRAN"], event_count=600)
-    merger = ClusterMerger(
-        mention_overlap_min=1,
-        jaccard_threshold=0.3,
-        max_cluster_size=2000,
+def test_merge_allowed_past_former_2000_event_cap():
+    """Clusters whose combined event_count far exceeds the old 2000-event cap must still merge.
+
+    The size cap was removed in the cluster-merge redesign; only the time-proximity
+    and shared-action-type gates can now block a merge.
+    """
+    c1 = _make_cluster(
+        "c1",
+        ["https://shared.com/x"],
+        ["IRAN"],
+        event_count=15000,
+        dominant_event_types=["Combattimento"],
+        event_date_ref_start=20260310,
+        event_date_ref_end=20260311,
     )
+    c2 = _make_cluster(
+        "c2",
+        ["https://shared.com/x"],
+        ["IRAN"],
+        event_count=10000,
+        dominant_event_types=["Combattimento"],
+        event_date_ref_start=20260310,
+        event_date_ref_end=20260311,
+    )
+    merger = ClusterMerger(mention_overlap_min=1, jaccard_threshold=0.3)
+    result = merger.merge([c1, c2])
+    assert len(result) == 1
+    assert result[0]["event_count"] == 25000
+
+
+# ── time-proximity gate ───────────────────────────────────────────────────────
+
+
+def test_time_gate_blocks_merge_when_date_ranges_too_far_apart_mention_overlap():
+    """Clusters >3 days apart by event date range must NOT be merged via mention overlap."""
+    c1 = _make_cluster(
+        "c1",
+        ["https://shared.com/x", "https://shared.com/y"],
+        ["IRAN"],
+        dominant_event_types=["Combattimento"],
+        event_date_ref_start=20260301,
+        event_date_ref_end=20260301,
+    )
+    c2 = _make_cluster(
+        "c2",
+        ["https://shared.com/x", "https://shared.com/y"],
+        ["IRAN"],
+        dominant_event_types=["Combattimento"],
+        event_date_ref_start=20260310,  # 9 days later
+        event_date_ref_end=20260310,
+    )
+    merger = ClusterMerger(mention_overlap_min=2, jaccard_threshold=1.0, max_merge_day_gap=3)
     result = merger.merge([c1, c2])
     assert len(result) == 2
 
 
-def test_merge_allowed_when_result_within_max_cluster_size():
-    """A merge that stays within max_cluster_size must proceed normally."""
-    c1 = _make_cluster("c1", ["https://shared.com/x"], ["IRAN"], event_count=800)
-    c2 = _make_cluster("c2", ["https://shared.com/x"], ["IRAN"], event_count=600)
-    merger = ClusterMerger(
-        mention_overlap_min=1,
-        jaccard_threshold=0.3,
-        max_cluster_size=2000,
+def test_time_gate_blocks_merge_when_date_ranges_too_far_apart_jaccard():
+    """Clusters >3 days apart by event date range must NOT be merged via Jaccard themes."""
+    c1 = _make_cluster(
+        "c1",
+        ["https://url-a.com/1"],
+        ["IRAN", "WAR", "OIL", "MILITARY"],
+        dominant_event_types=["Combattimento"],
+        event_date_ref_start=20260301,
+        event_date_ref_end=20260301,
     )
+    c2 = _make_cluster(
+        "c2",
+        ["https://url-b.com/2"],
+        ["IRAN", "WAR", "SANCTIONS"],
+        dominant_event_types=["Combattimento"],
+        event_date_ref_start=20260310,  # 9 days later — Jaccard 0.4 but gap blocks
+        event_date_ref_end=20260310,
+    )
+    merger = ClusterMerger(mention_overlap_min=1, jaccard_threshold=0.3, max_merge_day_gap=3)
     result = merger.merge([c1, c2])
-    assert len(result) == 1
-    assert result[0]["event_count"] == 1400
+    assert len(result) == 2
 
 
-def test_max_cluster_size_none_disables_cap():
-    """When max_cluster_size is None the size cap must not block any merge."""
-    c1 = _make_cluster("c1", ["https://shared.com/x"], ["IRAN"], event_count=5000)
-    c2 = _make_cluster("c2", ["https://shared.com/x"], ["IRAN"], event_count=5000)
-    merger = ClusterMerger(
-        mention_overlap_min=1,
-        jaccard_threshold=0.3,
-        max_cluster_size=None,
+def test_time_gate_allows_merge_within_gap():
+    """Clusters whose date ranges are within max_merge_day_gap days must still merge."""
+    c1 = _make_cluster(
+        "c1",
+        ["https://shared.com/x", "https://shared.com/y"],
+        ["IRAN"],
+        dominant_event_types=["Combattimento"],
+        event_date_ref_start=20260308,
+        event_date_ref_end=20260308,
     )
+    c2 = _make_cluster(
+        "c2",
+        ["https://shared.com/x", "https://shared.com/y"],
+        ["IRAN"],
+        dominant_event_types=["Combattimento"],
+        event_date_ref_start=20260310,  # 2 days later — within gap=3
+        event_date_ref_end=20260310,
+    )
+    merger = ClusterMerger(mention_overlap_min=2, jaccard_threshold=1.0, max_merge_day_gap=3)
     result = merger.merge([c1, c2])
     assert len(result) == 1
+
+
+def test_time_gate_missing_dates_allow_merge():
+    """When event_date_ref_start/end are None the time gate must default to allow."""
+    c1 = _make_cluster(
+        "c1",
+        ["https://shared.com/x"],
+        ["IRAN"],
+        dominant_event_types=["Combattimento"],
+        # no event_date_ref_start / event_date_ref_end
+    )
+    c2 = _make_cluster(
+        "c2",
+        ["https://shared.com/x"],
+        ["IRAN"],
+        dominant_event_types=["Combattimento"],
+    )
+    merger = ClusterMerger(mention_overlap_min=1, jaccard_threshold=0.3, max_merge_day_gap=0)
+    result = merger.merge([c1, c2])
+    assert len(result) == 1
+
+
+# ── shared action-type gate ───────────────────────────────────────────────────
+
+
+def test_action_type_gate_blocks_merge_when_no_shared_type():
+    """Clusters that share no dominant_event_type must NOT be merged."""
+    c1 = _make_cluster(
+        "c1",
+        ["https://shared.com/x", "https://shared.com/y"],
+        ["IRAN"],
+        dominant_event_types=["Protesta"],
+        event_date_ref_start=20260310,
+        event_date_ref_end=20260310,
+    )
+    c2 = _make_cluster(
+        "c2",
+        ["https://shared.com/x", "https://shared.com/y"],
+        ["IRAN"],
+        dominant_event_types=["Diplomazia"],
+        event_date_ref_start=20260310,
+        event_date_ref_end=20260310,
+    )
+    merger = ClusterMerger(mention_overlap_min=2, jaccard_threshold=1.0, max_merge_day_gap=3)
+    result = merger.merge([c1, c2])
+    assert len(result) == 2
+
+
+def test_action_type_gate_allows_merge_with_shared_type():
+    """Clusters sharing at least one dominant_event_type must still be eligible to merge."""
+    c1 = _make_cluster(
+        "c1",
+        ["https://shared.com/x", "https://shared.com/y"],
+        ["IRAN"],
+        dominant_event_types=["Combattimento", "Protesta"],
+        event_date_ref_start=20260310,
+        event_date_ref_end=20260310,
+    )
+    c2 = _make_cluster(
+        "c2",
+        ["https://shared.com/x", "https://shared.com/y"],
+        ["IRAN"],
+        dominant_event_types=["Combattimento"],
+        event_date_ref_start=20260310,
+        event_date_ref_end=20260310,
+    )
+    merger = ClusterMerger(mention_overlap_min=2, jaccard_threshold=1.0, max_merge_day_gap=3)
+    result = merger.merge([c1, c2])
+    assert len(result) == 1
+
+
+def test_action_type_gate_missing_types_allow_merge():
+    """When dominant_event_types is empty the action-type gate must default to allow."""
+    c1 = _make_cluster(
+        "c1",
+        ["https://shared.com/x"],
+        ["IRAN"],
+        dominant_event_types=[],
+        event_date_ref_start=20260310,
+        event_date_ref_end=20260310,
+    )
+    c2 = _make_cluster(
+        "c2",
+        ["https://shared.com/x"],
+        ["IRAN"],
+        dominant_event_types=[],
+        event_date_ref_start=20260310,
+        event_date_ref_end=20260310,
+    )
+    merger = ClusterMerger(mention_overlap_min=1, jaccard_threshold=0.3, max_merge_day_gap=3)
+    result = merger.merge([c1, c2])
+    assert len(result) == 1
+
+
+# ── component state update ────────────────────────────────────────────────────
+
+
+def test_union_updates_date_bounds_correctly():
+    """After a union the merged component's date range is the outer envelope of both."""
+    c1 = _make_cluster(
+        "c1",
+        ["https://shared.com/x"],
+        ["IRAN", "WAR", "OIL", "MILITARY"],
+        dominant_event_types=["Combattimento"],
+        event_date_ref_start=20260305,
+        event_date_ref_end=20260307,
+    )
+    c2 = _make_cluster(
+        "c2",
+        ["https://url-b.com/2"],
+        ["IRAN", "WAR", "SANCTIONS"],  # Jaccard 0.4 — merges
+        dominant_event_types=["Combattimento"],
+        event_date_ref_start=20260308,
+        event_date_ref_end=20260309,
+    )
+    merger = ClusterMerger(mention_overlap_min=1, jaccard_threshold=0.3, max_merge_day_gap=5)
+    result = merger.merge([c1, c2])
+    assert len(result) == 1
+    assert result[0]["event_date_ref_start"] == 20260305
+    assert result[0]["event_date_ref_end"] == 20260309
+
+
+def test_union_updates_action_types_correctly():
+    """After a union the merged component holds the union of both sets' action types.
+
+    c1 and c2 share the "Combattimento" action type (so the gate allows the merge)
+    but c1 also has "Protesta".  After fusion both types must appear in
+    dominant_event_types, proving the component-state union propagated correctly.
+    """
+    c1 = _make_cluster(
+        "c1",
+        ["https://shared.com/x"],
+        ["IRAN", "WAR", "OIL", "MILITARY"],
+        dominant_event_types=["Combattimento", "Combattimento", "Protesta"],
+        event_date_ref_start=20260308,
+        event_date_ref_end=20260308,
+    )
+    c2 = _make_cluster(
+        "c2",
+        ["https://url-b.com/2"],
+        ["IRAN", "WAR", "SANCTIONS"],  # Jaccard 0.4 — merges
+        dominant_event_types=["Combattimento"],
+        event_date_ref_start=20260308,
+        event_date_ref_end=20260308,
+    )
+    merger = ClusterMerger(mention_overlap_min=1, jaccard_threshold=0.3, max_merge_day_gap=3)
+    result = merger.merge([c1, c2])
+    assert len(result) == 1
+    # After fuse, dominant_event_types is recalculated from all members' values.
+    # "Combattimento" appears 3+1=4 times; "Protesta" appears once — both in top-5.
+    types = set(result[0]["dominant_event_types"])
+    assert "Combattimento" in types
+    assert "Protesta" in types

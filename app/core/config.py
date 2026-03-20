@@ -59,6 +59,60 @@ class Settings(BaseSettings):
     rate_limit_per_minute: int = Field(default=10, ge=1, le=1000)
 
     # ── Cluster pipeline ──────────────────────────────────────────────────
+    # Maximum calendar-day gap allowed between the event date ranges of two
+    # components before the time-proximity merge gate blocks their union.
+    # Set to 0 to require date ranges to overlap or touch; set to a large
+    # value (e.g. 9999) to effectively disable the gate.
+    # Env var: CLUSTER_MAX_MERGE_DAY_GAP
+    cluster_max_merge_day_gap: int = Field(default=3, ge=0)
+
+    # URL path segments that identify section/archive pages rather than individual
+    # articles. Candidates whose URL path contains any of these segments are excluded
+    # from cluster scoring regardless of their topic_score.
+    # Override via CLUSTER_SECTION_PATH_SEGMENTS env var as a JSON array:
+    #   CLUSTER_SECTION_PATH_SEGMENTS='["/search/","/tag/"]'
+    cluster_section_path_segments: tuple[str, ...] = Field(
+        default=(
+            "/search/",
+            "/label/",
+            "/category/",
+            "/categories/",
+            "/tag/",
+            "/tags/",
+            "/topic/",
+            "/topics/",
+            "/author/",
+            "/authors/",
+            "/archive/",
+            "/archives/",
+            "/page/",
+        ),
+        description="URL path segments that identify section/aggregator pages.",
+    )
+
+    # Candidates with num_mentions == 0 are excluded: an article cited by nobody
+    # in the GDELT mention layer has no news propagation signal.
+    # Set to False to disable this gate entirely.
+    # Env var: CLUSTER_REQUIRE_MENTIONS (true/false)
+    cluster_require_mentions: bool = Field(default=True)
+
+    @field_validator("cluster_section_path_segments", mode="before")
+    @classmethod
+    def parse_section_path_segments(
+        cls, v: str | list | tuple | set | frozenset
+    ) -> tuple[str, ...]:
+        if isinstance(v, (list, tuple, set, frozenset)):
+            return tuple(v)
+        if isinstance(v, str):
+            try:
+                parsed = json.loads(v)
+                if isinstance(parsed, list):
+                    return tuple(parsed)
+            except (json.JSONDecodeError, ValueError):
+                pass
+            return tuple(s.strip() for s in v.split(",") if s.strip())
+        return ()
+
     # Domains whose source URLs are excluded from cluster candidate scoring.
     # These are pure aggregators / content farms that produce no original
     # journalism: they copy feeds from wire services, inflating topic_score
@@ -79,6 +133,7 @@ class Settings(BaseSettings):
                 "www.miragenews.com",
                 "countercurrents.org",
                 "www.globalsecurity.org",
+                "www.gazetteandherald.co.uk",
             }
         ),
         description="Source URL domains excluded from cluster candidate scoring.",

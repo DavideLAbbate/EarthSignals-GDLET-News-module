@@ -148,3 +148,32 @@ async def test_delete_computed_before_removes_old_clusters(db_session):
 
     clusters, _ = await repo.search()
     assert all(c.cluster_id != "old_c" for c in clusters)
+
+
+async def test_upsert_and_retrieve_event_date_ref_fields(db_session):
+    """Upserting a cluster with event_date_ref_start/end must persist and round-trip correctly."""
+    repo = ClusterRepository(db_session)
+    cluster = _make_cluster("date_ref_c1", 5.0, ["US"])
+    cluster["event_date_ref_start"] = 20260305
+    cluster["event_date_ref_end"] = 20260310
+    await repo.upsert(cluster)
+    await db_session.commit()
+
+    clusters, _ = await repo.search()
+    row = next((c for c in clusters if c.cluster_id == "date_ref_c1"), None)
+    assert row is not None
+    assert row.event_date_ref_start == 20260305
+    assert row.event_date_ref_end == 20260310
+
+
+async def test_upsert_event_date_ref_fields_null_by_default(db_session):
+    """A cluster upserted without event_date_ref fields must store NULL for both."""
+    repo = ClusterRepository(db_session)
+    await repo.upsert(_make_cluster("date_ref_null", 4.0))
+    await db_session.commit()
+
+    clusters, _ = await repo.search()
+    row = next((c for c in clusters if c.cluster_id == "date_ref_null"), None)
+    assert row is not None
+    assert row.event_date_ref_start is None
+    assert row.event_date_ref_end is None

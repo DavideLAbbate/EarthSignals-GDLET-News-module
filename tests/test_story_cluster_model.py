@@ -76,6 +76,8 @@ async def test_story_cluster_all_enrichment_fields(db_session):
         organizations=["Arab Foreign Ministers Council"],
         gkg_locations=["Tehran, Tehran, Iran", "Bahrain"],
         document_tone_avg=-8.1,
+        event_date_ref_start=20260305,
+        event_date_ref_end=20260310,
         computed_at=now,
     )
     db_session.add(cluster)
@@ -90,3 +92,23 @@ async def test_story_cluster_all_enrichment_fields(db_session):
     assert row.mention_count == 42
     assert "ARMEDCONFLICT" in row.themes
     assert row.document_tone_avg == pytest.approx(-8.1)
+    assert row.event_date_ref_start == 20260305
+    assert row.event_date_ref_end == 20260310
+
+
+async def test_story_cluster_event_date_ref_columns_exist_and_default_none(db_session):
+    """event_date_ref_start and event_date_ref_end must exist as nullable Integer columns."""
+    cluster = StoryCluster(
+        cluster_id="cluster_date_ref_null_test",
+        source_url="https://example.com/null-date-ref",
+        computed_at=datetime.now(UTC),
+    )
+    db_session.add(cluster)
+    await db_session.commit()
+
+    result = await db_session.execute(
+        select(StoryCluster).where(StoryCluster.cluster_id == "cluster_date_ref_null_test")
+    )
+    row = result.scalar_one()
+    assert row.event_date_ref_start is None
+    assert row.event_date_ref_end is None

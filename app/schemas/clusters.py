@@ -56,6 +56,8 @@ class StoryClusterResponse(BaseModel):
     event_enrichment: ClusterEventEnrichment
     mentions_enrichment: ClusterMentionsEnrichment
     gkg_enrichment: ClusterGkgEnrichment
+    event_date_ref_start: int | None = None
+    event_date_ref_end: int | None = None
     computed_at: datetime
 
 

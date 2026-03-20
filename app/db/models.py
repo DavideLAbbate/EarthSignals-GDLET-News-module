@@ -243,6 +243,12 @@ class StoryCluster(Base):
     gkg_locations: Mapped[list | None] = mapped_column(JSON, nullable=True)
     document_tone_avg: Mapped[float | None] = mapped_column(Float, nullable=True)
 
+    # ── Event date range ───────────────────────────────────────────────────
+    # Calendar span of the underlying GDELT events (sql_date YYYYMMDD integer).
+    # Populated during cluster build; used by the time-proximity merge gate.
+    event_date_ref_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    event_date_ref_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     computed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )

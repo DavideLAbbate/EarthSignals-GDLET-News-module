@@ -55,7 +55,11 @@ class ClusterService:
         that produce no original journalism and pollute dominant_countries and
         themes with unrelated geographies and topics.
         """
-        blocklist = get_settings().cluster_source_domain_blocklist
+        settings = get_settings()
+        blocklist = settings.cluster_source_domain_blocklist
+        section_segments = settings.cluster_section_path_segments
+        require_mentions = settings.cluster_require_mentions
+
         filters = [
             GdeltEvent.date_added >= since_date_added,
             GdeltEvent.source_url.is_not(None),
@@ -77,17 +81,26 @@ class ClusterService:
 
         candidates: list[dict[str, Any]] = []
         blocked = 0
+        section_filtered = 0
+        mention_filtered = 0
         for row in result.all():
             if not row.source_url:
                 continue
-            # Extract domain from URL and check against blocklist.
-            # Handles both "https://www.example.com/path" and "http://example.com/path".
+            # Gate 0 — domain blocklist
             try:
                 domain = row.source_url.split("//", 1)[1].split("/", 1)[0].lower()
             except IndexError:
                 domain = ""
             if domain in blocklist:
                 blocked += 1
+                continue
+            # Gate 1 — section/aggregator URL path pattern
+            if _is_section_url(row.source_url, section_segments):
+                section_filtered += 1
+                continue
+            # Gate 2 — zero-mention vitality gate
+            if require_mentions and row.num_mentions == 0:
+                mention_filtered += 1
                 continue
             topic_score = compute_topic_score(
                 event_count=row.event_count,
@@ -111,6 +124,10 @@ class ClusterService:
             logger.info(
                 "cluster_candidates_blocked", blocked=blocked, blocklist_size=len(blocklist)
             )
+        if section_filtered:
+            logger.info("cluster_candidates_section_filtered", filtered=section_filtered)
+        if mention_filtered:
+            logger.info("cluster_candidates_mention_filtered", filtered=mention_filtered)
 
         candidates.sort(key=lambda item: item["topic_score"], reverse=True)
         return candidates
@@ -252,6 +269,8 @@ class ClusterService:
             "num_sources": doc["num_sources"],
             "topic_score": doc["topic_score"],
             "event_ids": event_ids,
+            "event_date_ref_start": min(e.sql_date for e in events) if events else None,
+            "event_date_ref_end": max(e.sql_date for e in events) if events else None,
             "dominant_event_types": _top_values(event_type_labels),
             "dominant_quad_classes": _top_values(quad_labels),
             "avg_severity_score": round(mean(severities), 2) if severities else None,
@@ -369,9 +388,14 @@ class ClusterService:
             # ── Merge semantically related clusters ──────────────────────────────
             # mention_overlap_min=2 requires at least two shared mention URLs to merge,
             # preventing a single high-traffic news wire URL (e.g. Reuters) from fusing
-            # unrelated stories. max_themes_for_jaccard=50 and max_cluster_size=2000 are
-            # the ClusterMerger defaults and guard against O(n²) explosion and runaway merges.
-            merger = ClusterMerger(mention_overlap_min=2, jaccard_threshold=0.3)
+            # unrelated stories. max_themes_for_jaccard=50 guards against O(n²) explosion.
+            # max_merge_day_gap blocks merges between clusters whose event date ranges are
+            # more than N calendar days apart (configurable via CLUSTER_MAX_MERGE_DAY_GAP).
+            merger = ClusterMerger(
+                mention_overlap_min=2,
+                jaccard_threshold=0.3,
+                max_merge_day_gap=get_settings().cluster_max_merge_day_gap,
+            )
             cluster_rows = merger.merge(cluster_rows)
             t_merge = time.monotonic()
             logger.info(
@@ -426,3 +450,15 @@ def _normalize_since_date_added(value: datetime | int) -> int:
 def _parse_gdelt_timestamp(value: int) -> datetime:
     """Convert a GDELT YYYYMMDDHHMMSS integer timestamp into UTC datetime."""
     return datetime.strptime(str(value), "%Y%m%d%H%M%S").replace(tzinfo=UTC)
+
+
+def _is_section_url(url: str, segments: tuple[str, ...]) -> bool:
+    """Return True if the URL path contains any of the given section path segments.
+
+    Matching is case-insensitive. An empty ``segments`` tuple always returns False.
+    Used to discard aggregator/archive/tag pages before cluster scoring.
+    """
+    if not segments:
+        return False
+    url_lower = url.lower()
+    return any(seg.lower() in url_lower for seg in segments)

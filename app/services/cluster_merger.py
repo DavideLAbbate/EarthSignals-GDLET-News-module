@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from statistics import mean
 from typing import Any
 
@@ -49,6 +49,11 @@ def _jaccard(a: set[str], b: set[str]) -> float:
     return len(a & b) / union_size
 
 
+def _yyyymmdd_to_date(value: int) -> date:
+    """Convert an 8-digit YYYYMMDD integer to a :class:`datetime.date`."""
+    return datetime.strptime(str(value), "%Y%m%d").date()
+
+
 # ── Merger ────────────────────────────────────────────────────────────────────
 
 _LIST_FIELDS = (
@@ -77,20 +82,38 @@ _DOMINANT_FIELDS = (
 
 
 class ClusterMerger:
-    """Fuse overlapping story clusters via mention-URL overlap and theme Jaccard similarity."""
+    """Fuse overlapping story clusters via mention-URL overlap and theme Jaccard similarity.
+
+    Two gating conditions are evaluated before each union:
+
+    * **Time-proximity gate** — the event date ranges (``event_date_ref_start`` /
+      ``event_date_ref_end``) of the two components must be within
+      ``max_merge_day_gap`` calendar days of each other.  Clusters reporting
+      events from entirely different weeks cannot represent the same story.
+
+    * **Shared action-type gate** — the two components must share at least one
+      CAMEO root-code label in their ``dominant_event_types``.  A diplomacy
+      cluster and a protest cluster are structurally different stories even if
+      they share GKG themes.
+
+    When either gate returns ``False`` the pair is skipped for that pass.
+    If a cluster is missing the relevant field (``None`` / empty), the gate
+    defaults to ``True`` (allow merge) so that legacy or sparse data is not
+    inadvertently blocked.
+    """
 
     def __init__(
         self,
         mention_overlap_min: int = 1,
         jaccard_threshold: float = 0.3,
         max_themes_for_jaccard: int | None = 50,
-        max_cluster_size: int | None = 2000,
+        max_merge_day_gap: int = 3,
         max_theme_df: float = 0.2,
     ) -> None:
         self._mention_overlap_min = mention_overlap_min
         self._jaccard_threshold = jaccard_threshold
         self._max_themes_for_jaccard = max_themes_for_jaccard
-        self._max_cluster_size = max_cluster_size
+        self._max_merge_day_gap = max_merge_day_gap
         # max_theme_df: themes that appear in more than this fraction of all clusters
         # are excluded from the inverted index. A theme shared by 20%+ of clusters
         # (e.g. "UNITED_STATES", "ECONOMY") carries no discriminative signal and
@@ -106,11 +129,21 @@ class ClusterMerger:
             return []
 
         uf = _UnionFind(len(clusters))
-        # component_sizes tracks the total event_count per Union-Find root so that
-        # _would_exceed_size_cap can answer in O(α) instead of O(n) per call.
-        component_sizes = [c.get("event_count") or 0 for c in clusters]
-        self._union_by_mention_overlap(clusters, uf, component_sizes)
-        self._union_by_theme_jaccard(clusters, uf, component_sizes)
+
+        # Per-component state — all three dicts are indexed by Union-Find root and
+        # updated on every successful union so that gate checks remain O(α).
+        self._comp_date_start: dict[int, int | None] = {
+            i: c.get("event_date_ref_start") for i, c in enumerate(clusters)
+        }
+        self._comp_date_end: dict[int, int | None] = {
+            i: c.get("event_date_ref_end") for i, c in enumerate(clusters)
+        }
+        self._comp_action_types: dict[int, set[str]] = {
+            i: set(c.get("dominant_event_types") or []) for i, c in enumerate(clusters)
+        }
+
+        self._union_by_mention_overlap(clusters, uf)
+        self._union_by_theme_jaccard(clusters, uf)
 
         components = self._collect_components(clusters, uf)
         return [self._fuse(group) for group in components.values()]
@@ -121,13 +154,10 @@ class ClusterMerger:
         self,
         clusters: list[dict[str, Any]],
         uf: _UnionFind,
-        component_sizes: list[int],
     ) -> None:
         """Union pairs of clusters whose shared mention URL count >= mention_overlap_min.
 
-        Skips the union if the resulting component would exceed max_cluster_size.
-        component_sizes is mutated in-place to track per-root event_count sums so that
-        size checks remain O(α) rather than O(n).
+        Skips the union if either gate (time-proximity, shared action-type) blocks it.
         """
         url_to_indices: dict[str, list[int]] = defaultdict(list)
         for i, cluster in enumerate(clusters):
@@ -143,15 +173,19 @@ class ClusterMerger:
 
         for (i, j), count in pair_overlap.items():
             if count >= self._mention_overlap_min:
-                if self._would_exceed_size_cap(uf, component_sizes, i, j):
+                ri, rj = uf.find(i), uf.find(j)
+                if ri == rj:
                     continue
-                self._union_and_update_sizes(uf, component_sizes, i, j)
+                if not self._date_ranges_within_gap(ri, rj):
+                    continue
+                if not self._shares_action_type(ri, rj):
+                    continue
+                self._union_and_update_state(uf, i, j)
 
     def _union_by_theme_jaccard(
         self,
         clusters: list[dict[str, Any]],
         uf: _UnionFind,
-        component_sizes: list[int],
     ) -> None:
         """Union pairs not yet connected whose theme Jaccard >= jaccard_threshold.
 
@@ -163,8 +197,7 @@ class ClusterMerger:
         Each cluster's theme set is truncated to max_themes_for_jaccard items before
         computing similarity, preventing clusters with thousands of generic tags from
         generating spurious high-Jaccard matches.
-        Skips the union if the resulting component would exceed max_cluster_size.
-        component_sizes is mutated in-place for O(α) size checks.
+        Skips the union if either gate (time-proximity, shared action-type) blocks it.
         """
         cap = self._max_themes_for_jaccard
         if cap is None:
@@ -197,50 +230,77 @@ class ClusterMerger:
                     candidate_pairs.add((min(indices[a], indices[b]), max(indices[a], indices[b])))
 
         for i, j in candidate_pairs:
-            if uf.find(i) == uf.find(j):
+            ri, rj = uf.find(i), uf.find(j)
+            if ri == rj:
                 continue  # already merged — skip Jaccard check
             if _jaccard(theme_sets[i], theme_sets[j]) > self._jaccard_threshold:
-                if self._would_exceed_size_cap(uf, component_sizes, i, j):
+                if not self._date_ranges_within_gap(ri, rj):
                     continue
-                self._union_and_update_sizes(uf, component_sizes, i, j)
+                if not self._shares_action_type(ri, rj):
+                    continue
+                self._union_and_update_state(uf, i, j)
 
-    def _would_exceed_size_cap(
-        self,
-        uf: _UnionFind,
-        component_sizes: list[int],
-        i: int,
-        j: int,
-    ) -> bool:
-        """Return True if merging the components of i and j would exceed max_cluster_size.
+    # ── merge gates ──────────────────────────────────────────────────────────
 
-        O(α) — reads pre-aggregated sizes indexed by Union-Find root.
+    def _date_ranges_within_gap(self, ri: int, rj: int) -> bool:
+        """Return True if the two components' event date ranges are within max_merge_day_gap days.
+
+        Missing date data → allow merge (safe default).
         """
-        if self._max_cluster_size is None:
-            return False
-        ri, rj = uf.find(i), uf.find(j)
-        if ri == rj:
-            return False
-        return (component_sizes[ri] + component_sizes[rj]) > self._max_cluster_size
+        s_i = self._comp_date_start.get(ri)
+        e_i = self._comp_date_end.get(ri)
+        s_j = self._comp_date_start.get(rj)
+        e_j = self._comp_date_end.get(rj)
+        if any(v is None for v in (s_i, e_i, s_j, e_j)):
+            return True
+        date_i_start = _yyyymmdd_to_date(s_i)  # type: ignore[arg-type]
+        date_i_end = _yyyymmdd_to_date(e_i)  # type: ignore[arg-type]
+        date_j_start = _yyyymmdd_to_date(s_j)  # type: ignore[arg-type]
+        date_j_end = _yyyymmdd_to_date(e_j)  # type: ignore[arg-type]
+        gap = max(0, (date_j_start - date_i_end).days, (date_i_start - date_j_end).days)
+        return gap <= self._max_merge_day_gap
 
-    def _union_and_update_sizes(
-        self,
-        uf: _UnionFind,
-        component_sizes: list[int],
-        i: int,
-        j: int,
-    ) -> None:
-        """Merge components i and j and update the root's size entry.
+    def _shares_action_type(self, ri: int, rj: int) -> bool:
+        """Return True if the two components share at least one dominant event type.
 
-        Must be called instead of uf.union directly so component_sizes stays consistent.
+        Missing action-type data → allow merge (safe default).
+        """
+        types_i = self._comp_action_types.get(ri, set())
+        types_j = self._comp_action_types.get(rj, set())
+        if not types_i or not types_j:
+            return True
+        return bool(types_i & types_j)
+
+    # ── state update ─────────────────────────────────────────────────────────
+
+    def _union_and_update_state(self, uf: _UnionFind, i: int, j: int) -> None:
+        """Merge components i and j and update per-component gate state.
+
+        Must be called instead of uf.union directly so the date-range and
+        action-type dicts stay consistent with the Union-Find structure.
         """
         ri, rj = uf.find(i), uf.find(j)
         if ri == rj:
             return
-        merged_size = component_sizes[ri] + component_sizes[rj]
         uf.union(i, j)
-        # After union, one root absorbs the other; update whichever is now the root.
         new_root = uf.find(i)
-        component_sizes[new_root] = merged_size
+
+        # Merge date bounds — take the outer envelope.
+        starts = [
+            v
+            for v in (self._comp_date_start.get(ri), self._comp_date_start.get(rj))
+            if v is not None
+        ]
+        ends = [
+            v for v in (self._comp_date_end.get(ri), self._comp_date_end.get(rj)) if v is not None
+        ]
+        self._comp_date_start[new_root] = min(starts) if starts else None
+        self._comp_date_end[new_root] = max(ends) if ends else None
+
+        # Merge action types — union of both sets.
+        self._comp_action_types[new_root] = self._comp_action_types.get(
+            ri, set()
+        ) | self._comp_action_types.get(rj, set())
 
     # ── component extraction ─────────────────────────────────────────────────
 
@@ -299,11 +359,19 @@ class ClusterMerger:
         # when sub-clusters have different numbers of GKG documents
         fused["document_tone_avg"] = _weighted_tone_avg(group)
 
-        # Temporal boundaries
+        # Temporal boundaries (mention layer)
         first_times = [c["first_mention_at"] for c in group if c.get("first_mention_at")]
         last_times = [c["last_mention_at"] for c in group if c.get("last_mention_at")]
         fused["first_mention_at"] = min(first_times) if first_times else None
         fused["last_mention_at"] = max(last_times) if last_times else None
+
+        # Event date range — outer envelope across all members
+        starts = [
+            m["event_date_ref_start"] for m in group if m.get("event_date_ref_start") is not None
+        ]
+        ends = [m["event_date_ref_end"] for m in group if m.get("event_date_ref_end") is not None]
+        fused["event_date_ref_start"] = min(starts) if starts else None
+        fused["event_date_ref_end"] = max(ends) if ends else None
 
         # Dominant fields — top-5 by frequency
         for field in _DOMINANT_FIELDS:

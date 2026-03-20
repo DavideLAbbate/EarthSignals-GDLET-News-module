@@ -9,7 +9,7 @@ import pytest
 from sqlalchemy import select
 
 from app.db.models import GdeltEvent, GdeltGkg, GdeltMention, StoryCluster
-from app.services.cluster_service import ClusterService
+from app.services.cluster_service import ClusterService, _is_section_url
 
 
 # cluster_id is now solely a 24-hex-char SHA-256 prefix of the source_url,
@@ -156,7 +156,7 @@ async def test_build_and_materialise_excludes_blocklisted_domains(db_session) ->
         )
     await db_session.flush()
 
-    count = await ClusterService(db_session).build_and_materialise(20260313000000)
+    await ClusterService(db_session).build_and_materialise(20260313000000)
     await db_session.commit()
 
     result = await db_session.execute(select(StoryCluster))
@@ -410,3 +410,213 @@ async def test_score_source_urls_excludes_candidates_between_0_5_and_4(db_sessio
     candidates = await svc._score_source_urls(20260308)
     urls = [c["source_url"] for c in candidates]
     assert "https://medium-signal.example.com/article" not in urls
+
+
+# ── _is_section_url ───────────────────────────────────────────────────────────
+
+
+def test_is_section_url_matches_category():
+    assert (
+        _is_section_url(
+            "https://www.example.com/category/world/article-title",
+            ("/category/", "/tag/"),
+        )
+        is True
+    )
+
+
+def test_is_section_url_matches_search():
+    assert (
+        _is_section_url(
+            "https://www.geneamusings.com/search/label/Gu%20te%20Family",
+            ("/search/", "/label/"),
+        )
+        is True
+    )
+
+
+def test_is_section_url_does_not_match_normal_article():
+    assert (
+        _is_section_url(
+            "https://www.reuters.com/world/2026/03/15/iran-attack/",
+            ("/search/", "/category/", "/tag/"),
+        )
+        is False
+    )
+
+
+def test_is_section_url_empty_segments_never_matches():
+    assert _is_section_url("https://www.example.com/category/news", ()) is False
+
+
+def test_is_section_url_case_insensitive():
+    assert (
+        _is_section_url(
+            "https://www.example.com/Category/world/article",
+            ("/category/",),
+        )
+        is True
+    )
+
+
+async def test_build_cluster_sets_event_date_ref_range(db_session) -> None:
+    """_build_cluster must set event_date_ref_start to min(sql_date) and event_date_ref_end
+    to max(sql_date) across all events for the cluster's source URL."""
+    source_url = "https://example.com/date-range-story"
+    db_session.add_all(
+        [
+            _make_event(
+                4001,
+                source_url=source_url,
+                sql_date=20260305,
+                num_mentions=500,
+                num_sources=50,
+                num_articles=500,
+            ),
+            _make_event(
+                4002,
+                source_url=source_url,
+                sql_date=20260308,
+                num_mentions=500,
+                num_sources=50,
+                num_articles=500,
+            ),
+            _make_event(
+                4003,
+                source_url=source_url,
+                sql_date=20260301,
+                num_mentions=500,
+                num_sources=50,
+                num_articles=500,
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    service = ClusterService(db_session)
+    count = await service.build_and_materialise(datetime(2026, 3, 1, tzinfo=UTC))
+    await db_session.commit()
+
+    assert count == 1
+
+    result = await db_session.execute(select(StoryCluster))
+    cluster = result.scalars().one()
+    assert cluster.event_date_ref_start == 20260301
+    assert cluster.event_date_ref_end == 20260308
+
+
+async def test_fused_cluster_event_date_ref_range_is_outer_envelope(db_session) -> None:
+    """Fused cluster event_date_ref range must be the outer envelope of all member clusters."""
+    shared_mentions = [
+        "https://shared-news.example.com/iran-story",
+        "https://shared-wire.example.com/iran-story",
+    ]
+
+    # source-a: events on days 20260305 and 20260306
+    for i, (url, sql_date, eid) in enumerate(
+        [
+            ("https://source-a.example.com/article", 20260305, 5001),
+            ("https://source-a.example.com/article", 20260306, 5002),
+            ("https://source-b.example.com/article", 20260308, 5003),
+            ("https://source-b.example.com/article", 20260309, 5004),
+        ]
+    ):
+        db_session.add(
+            GdeltEvent(
+                global_event_id=eid,
+                sql_date=sql_date,
+                date_added=20260310120000,
+                source_url=url,
+                num_articles=500,
+                num_mentions=500,
+                num_sources=50,
+            )
+        )
+        for shared_url in shared_mentions:
+            db_session.add(
+                GdeltMention(
+                    global_event_id=eid,
+                    mention_identifier=shared_url,
+                    mention_source_name="shared-news.example.com",
+                )
+            )
+    await db_session.flush()
+
+    svc = ClusterService(db_session)
+    count = await svc.build_and_materialise(datetime(2026, 3, 1, tzinfo=UTC))
+    await db_session.flush()
+
+    result = await db_session.execute(select(StoryCluster))
+    clusters = result.scalars().all()
+    assert count == 1
+    assert len(clusters) == 1
+    fused = clusters[0]
+    # Outer envelope: min of 20260305, 20260308 → 20260305; max of 20260306, 20260309 → 20260309
+    assert fused.event_date_ref_start == 20260305
+    assert fused.event_date_ref_end == 20260309
+
+
+# ── _score_source_urls quality gates ─────────────────────────────────────────
+
+
+async def test_score_source_urls_excludes_section_path_url(db_session) -> None:
+    """A source URL whose path contains a section segment must be excluded."""
+    db_session.add(
+        GdeltEvent(
+            global_event_id=6001,
+            sql_date=20260315,
+            date_added=20260315120000,
+            source_url="https://www.example.com/category/world/iran-story",
+            num_articles=500,
+            num_mentions=500,
+            num_sources=100,
+        )
+    )
+    await db_session.flush()
+
+    svc = ClusterService(db_session)
+    candidates = await svc._score_source_urls(20260315000000)
+    urls = [c["source_url"] for c in candidates]
+    assert "https://www.example.com/category/world/iran-story" not in urls
+
+
+async def test_score_source_urls_excludes_zero_mention_candidate(db_session) -> None:
+    """A source URL with num_mentions == 0 must be excluded when cluster_require_mentions=True."""
+    db_session.add(
+        GdeltEvent(
+            global_event_id=6002,
+            sql_date=20260315,
+            date_added=20260315120000,
+            source_url="https://www.example.com/zero-mention-story",
+            num_articles=500,
+            num_mentions=0,
+            num_sources=100,
+        )
+    )
+    await db_session.flush()
+
+    svc = ClusterService(db_session)
+    candidates = await svc._score_source_urls(20260315000000)
+    urls = [c["source_url"] for c in candidates]
+    assert "https://www.example.com/zero-mention-story" not in urls
+
+
+async def test_score_source_urls_allows_normal_article_with_mentions(db_session) -> None:
+    """A well-formed article URL with mentions must still pass both gates."""
+    db_session.add(
+        GdeltEvent(
+            global_event_id=6003,
+            sql_date=20260315,
+            date_added=20260315120000,
+            source_url="https://www.reuters.com/world/2026/03/15/iran-story/",
+            num_articles=500,
+            num_mentions=500,
+            num_sources=100,
+        )
+    )
+    await db_session.flush()
+
+    svc = ClusterService(db_session)
+    candidates = await svc._score_source_urls(20260315000000)
+    urls = [c["source_url"] for c in candidates]
+    assert "https://www.reuters.com/world/2026/03/15/iran-story/" in urls
