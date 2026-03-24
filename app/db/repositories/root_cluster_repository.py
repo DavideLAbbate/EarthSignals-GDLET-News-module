@@ -21,7 +21,7 @@ class RootClusterRepository:
     """Data access layer for the root_clusters table."""
 
     _TRANSIENT_KEYS: frozenset[str] = frozenset(
-        {"gkg_doc_count", "component_source_urls", "component_domains"}
+        {"gkg_doc_count", "component_source_urls", "component_domains", "merge_evidence"}
     )
 
     def __init__(self, session: AsyncSession) -> None:
@@ -149,3 +149,15 @@ class RootClusterRepository:
             delete(RootCluster).where(RootCluster.cluster_id.in_(cluster_ids))
         )
         return result.rowcount or 0
+
+    async def list_cluster_ids(self) -> set[str]:
+        """Return all materialized root cluster IDs."""
+        result = await self._session.execute(select(RootCluster.cluster_id))
+        return set(result.scalars().all())
+
+    async def exists_by_cluster_id(self, cluster_id: str) -> bool:
+        """Return whether a root cluster exists for the given cluster_id."""
+        result = await self._session.execute(
+            select(RootCluster.id).where(RootCluster.cluster_id == cluster_id).limit(1)
+        )
+        return result.scalar_one_or_none() is not None

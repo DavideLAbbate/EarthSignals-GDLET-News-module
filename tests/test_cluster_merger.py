@@ -652,3 +652,69 @@ def test_union_updates_action_types_correctly():
     types = set(result[0]["dominant_event_types"])
     assert "Combattimento" in types
     assert "Protesta" in types
+
+
+def test_merged_cluster_contains_lightweight_merge_evidence() -> None:
+    merger = ClusterMerger(mention_overlap_min=1, jaccard_threshold=0.3)
+    c1 = _make_cluster(
+        "c1",
+        ["https://shared.example.com/1"],
+        ["IRAN", "WAR"],
+        dominant_event_types=["Attacco"],
+        event_date_ref_start=20260324,
+        event_date_ref_end=20260324,
+    )
+    c2 = _make_cluster(
+        "c2",
+        ["https://shared.example.com/1"],
+        ["IRAN", "SANCTIONS"],
+        dominant_event_types=["Attacco"],
+        event_date_ref_start=20260325,
+        event_date_ref_end=20260325,
+    )
+
+    result = merger.merge([c1, c2])
+
+    assert len(result) == 1
+    assert result[0]["merge_evidence"] is not None
+    assert result[0]["merge_evidence"][0]["mention_overlap"] == 1
+    assert result[0]["merge_evidence"][0]["shared_action_type"] == "Attacco"
+
+
+def test_single_cluster_does_not_add_synthetic_merge_evidence() -> None:
+    merger = ClusterMerger(mention_overlap_min=1, jaccard_threshold=0.3)
+
+    result = merger.merge([_make_cluster("c1", ["https://url-a.com/1"], ["IRAN"])])
+
+    assert len(result) == 1
+    assert "merge_evidence" not in result[0]
+
+
+def test_empty_theme_clusters_do_not_merge_via_semantic_jaccard() -> None:
+    merger = ClusterMerger(mention_overlap_min=2, jaccard_threshold=0.3)
+    c1 = _make_cluster("c1", ["https://url-a.com/1"], [], dominant_event_types=["Attacco"])
+    c2 = _make_cluster("c2", ["https://url-b.com/2"], [], dominant_event_types=["Attacco"])
+
+    result = merger.merge([c1, c2])
+
+    assert len(result) == 2
+
+
+def test_empty_theme_clusters_still_merge_via_mention_overlap() -> None:
+    merger = ClusterMerger(mention_overlap_min=1, jaccard_threshold=0.3)
+    c1 = _make_cluster(
+        "c1",
+        ["https://shared.example.com/1"],
+        [],
+        dominant_event_types=["Attacco"],
+    )
+    c2 = _make_cluster(
+        "c2",
+        ["https://shared.example.com/1"],
+        [],
+        dominant_event_types=["Attacco"],
+    )
+
+    result = merger.merge([c1, c2])
+
+    assert len(result) == 1

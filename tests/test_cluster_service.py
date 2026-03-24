@@ -9,7 +9,16 @@ import pytest
 from sqlalchemy import select
 
 from app.core.config import get_settings
-from app.db.models import GdeltEvent, GdeltGkg, GdeltMention, RootCluster, StoryCluster
+from app.core.exceptions import ClusterBuildError
+from app.db.models import (
+    ClusterComponent,
+    ClusterComponentEvent,
+    GdeltEvent,
+    GdeltGkg,
+    GdeltMention,
+    RootCluster,
+    StoryCluster,
+)
 from app.integrations.event_enrichment_mapper import compute_component_topic_score
 from app.services.cluster_service import ClusterService, _is_section_url
 
@@ -757,6 +766,70 @@ def test_component_topic_score_uses_component_level_counts() -> None:
     )
 
 
+def test_choose_canonical_component_prefers_oldest_first_seen() -> None:
+    service = object.__new__(ClusterService)
+    candidates = [
+        {"component_id": "newer", "first_seen_at": datetime(2026, 3, 24, tzinfo=UTC)},
+        {"component_id": "older", "first_seen_at": datetime(2026, 3, 20, tzinfo=UTC)},
+    ]
+
+    canonical = service._choose_canonical_component(candidates)
+
+    assert canonical["component_id"] == "older"
+
+
+def test_event_overlap_returns_count_and_historical_ratio() -> None:
+    service = object.__new__(ClusterService)
+
+    overlap = service._event_overlap({"1001", "1002", "1003"}, {"1002", "1003", "1004", "1005"})
+
+    assert overlap["count"] == 2
+    assert overlap["historical_ratio"] == pytest.approx(0.5)
+    assert overlap["current_ratio"] == pytest.approx(2 / 3)
+
+
+def test_find_matching_components_returns_multi_match_candidates() -> None:
+    service = object.__new__(ClusterService)
+    current_payload = {"event_ids": {"1001", "1002", "1003"}}
+    persisted_components = [
+        {"component_id": "comp-a", "first_seen_at": datetime(2026, 3, 20, tzinfo=UTC)},
+        {"component_id": "comp-b", "first_seen_at": datetime(2026, 3, 21, tzinfo=UTC)},
+        {"component_id": "comp-c", "first_seen_at": datetime(2026, 3, 22, tzinfo=UTC)},
+    ]
+    active_membership = {
+        "comp-a": {"1001", "1002"},
+        "comp-b": {"1002", "1003"},
+        "comp-c": {"2000"},
+    }
+
+    matches = service._find_matching_components(
+        current_payload, persisted_components, active_membership
+    )
+
+    assert [match["component_id"] for match in matches] == ["comp-a", "comp-b"]
+
+
+def test_find_split_candidates_uses_historical_overlap_ratio() -> None:
+    service = object.__new__(ClusterService)
+    historical_component = {"component_id": "comp-a"}
+    active_membership = {"comp-a": {"1001", "1002", "1003", "1004", "1005"}}
+    current_payloads = [
+        {"cluster_id": "cluster-a", "event_ids": {"1001", "1002", "1003"}},
+        {"cluster_id": "cluster-b", "event_ids": {"1003", "1004", "1005"}},
+        {"cluster_id": "cluster-c", "event_ids": {"9001"}},
+    ]
+
+    split_candidates = service._find_split_candidates(
+        historical_component,
+        current_payloads,
+        active_membership,
+        overlap_min=2,
+        overlap_ratio=0.6,
+    )
+
+    assert [candidate["cluster_id"] for candidate in split_candidates] == ["cluster-a", "cluster-b"]
+
+
 async def test_build_and_materialise_uses_component_candidates_instead_of_single_source_url(
     db_session,
 ) -> None:
@@ -830,6 +903,606 @@ async def test_build_and_materialise_uses_component_candidates_instead_of_single
     assert cluster.cluster_id == _expected_cluster_id_for_events([1301, 1302])
     assert set(cluster.themes or []) == {"ATTACK", "IRAN", "SANCTIONS"}
     assert cluster.source_url in {source_url_a, source_url_b}
+
+
+async def test_build_and_materialise_preserves_component_id_across_growth(db_session) -> None:
+    shared_mention = "https://shared.example.com/persistent-story"
+    db_session.add_all(
+        [
+            _make_event(2101, source_url="https://a.example.com/story", date_added=20260324000000),
+            _make_event(2102, source_url="https://b.example.com/story", date_added=20260324010000),
+            _make_event(2104, source_url="https://d.example.com/story", date_added=20260324011000),
+            GdeltMention(
+                global_event_id=2101,
+                mention_identifier=shared_mention,
+                mention_source_name="shared.example.com",
+            ),
+            GdeltMention(
+                global_event_id=2102,
+                mention_identifier=shared_mention,
+                mention_source_name="shared.example.com",
+            ),
+            GdeltMention(
+                global_event_id=2104,
+                mention_identifier=shared_mention,
+                mention_source_name="shared.example.com",
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    service = ClusterService(db_session)
+    await service.build_and_materialise(20260324000000, 20260324020000)
+    await db_session.commit()
+
+    first_component = (await db_session.execute(select(ClusterComponent))).scalars().one()
+
+    db_session.add_all(
+        [
+            _make_event(2103, source_url="https://c.example.com/story", date_added=20260324020000),
+            GdeltMention(
+                global_event_id=2103,
+                mention_identifier=shared_mention,
+                mention_source_name="shared.example.com",
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    await service.build_and_materialise(20260324000000, 20260324030000)
+    await db_session.commit()
+
+    components = (await db_session.execute(select(ClusterComponent))).scalars().all()
+    memberships = (await db_session.execute(select(ClusterComponentEvent))).scalars().all()
+
+    assert len(components) == 1
+    assert components[0].component_id == first_component.component_id
+    assert {membership.event_id for membership in memberships if membership.is_active} == {
+        "2101",
+        "2102",
+        "2103",
+        "2104",
+    }
+
+
+async def test_build_and_materialise_marks_non_canonical_match_as_merged_into(db_session) -> None:
+    now = datetime(2026, 3, 24, tzinfo=UTC)
+    db_session.add_all(
+        [
+            ClusterComponent(
+                component_id="older-component",
+                status="active",
+                anchor_source_url="https://older.example.com/story",
+                component_source_urls=["https://older.example.com/story"],
+                anchor_locked_at=now,
+                first_seen_at=datetime(2026, 3, 20, tzinfo=UTC),
+                last_seen_at=now,
+                has_gkg=False,
+            ),
+            ClusterComponent(
+                component_id="newer-component",
+                status="active",
+                anchor_source_url="https://newer.example.com/story",
+                component_source_urls=["https://newer.example.com/story"],
+                anchor_locked_at=now,
+                first_seen_at=datetime(2026, 3, 22, tzinfo=UTC),
+                last_seen_at=now,
+                has_gkg=False,
+            ),
+            ClusterComponentEvent(
+                component_id="older-component",
+                event_id="3101",
+                first_seen_at=now,
+                last_seen_at=now,
+                is_active=True,
+            ),
+            ClusterComponentEvent(
+                component_id="older-component",
+                event_id="3102",
+                first_seen_at=now,
+                last_seen_at=now,
+                is_active=True,
+            ),
+            ClusterComponentEvent(
+                component_id="newer-component",
+                event_id="3103",
+                first_seen_at=now,
+                last_seen_at=now,
+                is_active=True,
+            ),
+            ClusterComponentEvent(
+                component_id="newer-component",
+                event_id="3104",
+                first_seen_at=now,
+                last_seen_at=now,
+                is_active=True,
+            ),
+            _make_event(3101, source_url="https://a.example.com/story", date_added=20260324000000),
+            _make_event(3102, source_url="https://b.example.com/story", date_added=20260324000100),
+            _make_event(3103, source_url="https://c.example.com/story", date_added=20260324000200),
+            _make_event(3104, source_url="https://d.example.com/story", date_added=20260324000300),
+            GdeltMention(
+                global_event_id=3101,
+                mention_identifier="https://shared.example.com/merge-story",
+                mention_source_name="shared.example.com",
+            ),
+            GdeltMention(
+                global_event_id=3102,
+                mention_identifier="https://shared.example.com/merge-story",
+                mention_source_name="shared.example.com",
+            ),
+            GdeltMention(
+                global_event_id=3103,
+                mention_identifier="https://shared.example.com/merge-story",
+                mention_source_name="shared.example.com",
+            ),
+            GdeltMention(
+                global_event_id=3104,
+                mention_identifier="https://shared.example.com/merge-story",
+                mention_source_name="shared.example.com",
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    await ClusterService(db_session).build_and_materialise(20260324000000, 20260324010000)
+    await db_session.commit()
+
+    components = {
+        component.component_id: component
+        for component in (await db_session.execute(select(ClusterComponent))).scalars().all()
+    }
+
+    assert components["older-component"].status == "active"
+    assert components["newer-component"].status == "merged"
+    assert components["newer-component"].merged_into_component_id == "older-component"
+
+
+async def test_build_and_materialise_keeps_original_anchor_on_matched_component(db_session) -> None:
+    now = datetime(2026, 3, 24, tzinfo=UTC)
+    db_session.add_all(
+        [
+            ClusterComponent(
+                component_id="component-1",
+                status="active",
+                anchor_source_url="https://anchor.example.com/original-story",
+                component_source_urls=["https://anchor.example.com/original-story"],
+                anchor_locked_at=now,
+                first_seen_at=datetime(2026, 3, 20, tzinfo=UTC),
+                last_seen_at=now,
+                has_gkg=False,
+            ),
+            ClusterComponentEvent(
+                component_id="component-1",
+                event_id="4101",
+                first_seen_at=now,
+                last_seen_at=now,
+                is_active=True,
+            ),
+            ClusterComponentEvent(
+                component_id="component-1",
+                event_id="4102",
+                first_seen_at=now,
+                last_seen_at=now,
+                is_active=True,
+            ),
+            _make_event(
+                4101, source_url="https://z.example.com/new-story", date_added=20260324000000
+            ),
+            _make_event(
+                4102, source_url="https://y.example.com/new-story", date_added=20260324000100
+            ),
+            GdeltMention(
+                global_event_id=4101,
+                mention_identifier="https://shared.example.com/anchor-story",
+                mention_source_name="shared.example.com",
+            ),
+            GdeltMention(
+                global_event_id=4102,
+                mention_identifier="https://shared.example.com/anchor-story",
+                mention_source_name="shared.example.com",
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    await ClusterService(db_session).build_and_materialise(20260324000000, 20260324010000)
+    await db_session.commit()
+
+    component = (await db_session.execute(select(ClusterComponent))).scalars().one()
+    assert component.anchor_source_url == "https://anchor.example.com/original-story"
+
+
+async def test_build_and_materialise_marks_component_split_when_history_branches(
+    db_session,
+    monkeypatch,
+) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "cluster_component_split_overlap_min", 2)
+    monkeypatch.setattr(settings, "cluster_component_split_overlap_ratio", 0.6)
+
+    now = datetime(2026, 3, 24, tzinfo=UTC)
+    db_session.add(
+        ClusterComponent(
+            component_id="component-1",
+            status="active",
+            anchor_source_url="https://anchor.example.com/original-story",
+            component_source_urls=["https://anchor.example.com/original-story"],
+            anchor_locked_at=now,
+            first_seen_at=datetime(2026, 3, 20, tzinfo=UTC),
+            last_seen_at=now,
+            has_gkg=False,
+        )
+    )
+    for event_id in [5101, 5102, 5103, 5104, 5105, 5106]:
+        db_session.add(
+            ClusterComponentEvent(
+                component_id="component-1",
+                event_id=str(event_id),
+                first_seen_at=now,
+                last_seen_at=now,
+                is_active=True,
+            )
+        )
+
+    shared_a = "https://shared.example.com/split-a"
+    shared_b = "https://shared.example.com/split-b"
+    db_session.add_all(
+        [
+            _make_event(5101, source_url="https://a.example.com/story", date_added=20260324000000),
+            _make_event(5102, source_url="https://b.example.com/story", date_added=20260324000100),
+            _make_event(5103, source_url="https://c.example.com/story", date_added=20260324000200),
+            _make_event(5104, source_url="https://d.example.com/story", date_added=20260324000300),
+            _make_event(5105, source_url="https://e.example.com/story", date_added=20260324000400),
+            _make_event(5106, source_url="https://f.example.com/story", date_added=20260324000500),
+            GdeltMention(
+                global_event_id=5101,
+                mention_identifier=shared_a,
+                mention_source_name="shared.example.com",
+            ),
+            GdeltMention(
+                global_event_id=5102,
+                mention_identifier=shared_a,
+                mention_source_name="shared.example.com",
+            ),
+            GdeltMention(
+                global_event_id=5103,
+                mention_identifier=shared_a,
+                mention_source_name="shared.example.com",
+            ),
+            GdeltMention(
+                global_event_id=5106,
+                mention_identifier=shared_b,
+                mention_source_name="shared.example.com",
+            ),
+            GdeltMention(
+                global_event_id=5104,
+                mention_identifier=shared_b,
+                mention_source_name="shared.example.com",
+            ),
+            GdeltMention(
+                global_event_id=5105,
+                mention_identifier=shared_b,
+                mention_source_name="shared.example.com",
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    await ClusterService(db_session).build_and_materialise(20260324000000, 20260324010000)
+    await db_session.commit()
+
+    components = {
+        component.component_id: component
+        for component in (await db_session.execute(select(ClusterComponent))).scalars().all()
+    }
+    assert components["component-1"].status == "split"
+
+
+async def test_build_and_materialise_marks_component_stale_after_missed_runs(
+    db_session,
+    monkeypatch,
+) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "cluster_component_stale_after_missing_runs", 3)
+
+    now = datetime(2026, 3, 24, tzinfo=UTC)
+    db_session.add(
+        ClusterComponent(
+            component_id="component-1",
+            status="active",
+            anchor_source_url="https://anchor.example.com/original-story",
+            component_source_urls=["https://anchor.example.com/original-story"],
+            anchor_locked_at=now,
+            first_seen_at=datetime(2026, 3, 20, tzinfo=UTC),
+            last_seen_at=now,
+            missing_run_count=2,
+            has_gkg=False,
+        )
+    )
+    db_session.add(
+        ClusterComponentEvent(
+            component_id="component-1",
+            event_id="6101",
+            first_seen_at=now,
+            last_seen_at=now,
+            is_active=True,
+        )
+    )
+    db_session.add_all(
+        [
+            _make_event(6201, source_url="https://a.example.com/story", date_added=20260324000000),
+            _make_event(6202, source_url="https://b.example.com/story", date_added=20260324000100),
+            _make_event(6203, source_url="https://c.example.com/story", date_added=20260324000200),
+            GdeltMention(
+                global_event_id=6201,
+                mention_identifier="https://shared.example.com/new",
+                mention_source_name="shared.example.com",
+            ),
+            GdeltMention(
+                global_event_id=6202,
+                mention_identifier="https://shared.example.com/new",
+                mention_source_name="shared.example.com",
+            ),
+            GdeltMention(
+                global_event_id=6203,
+                mention_identifier="https://shared.example.com/new",
+                mention_source_name="shared.example.com",
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    await ClusterService(db_session).build_and_materialise(20260324000000, 20260324010000)
+    await db_session.commit()
+
+    component = (
+        (
+            await db_session.execute(
+                select(ClusterComponent).where(ClusterComponent.component_id == "component-1")
+            )
+        )
+        .scalars()
+        .one()
+    )
+    assert component.status == "stale"
+    assert component.missing_run_count == 3
+
+
+async def test_build_and_materialise_updates_component_soft_reference_for_story_cluster(
+    db_session,
+) -> None:
+    shared_mention = "https://shared.example.com/soft-story"
+    db_session.add_all(
+        [
+            _make_event(7101, source_url="https://a.example.com/story", date_added=20260324000000),
+            _make_event(7102, source_url="https://b.example.com/story", date_added=20260324000100),
+            _make_event(7103, source_url="https://c.example.com/story", date_added=20260324000200),
+            GdeltMention(
+                global_event_id=7101,
+                mention_identifier=shared_mention,
+                mention_source_name="shared.example.com",
+            ),
+            GdeltMention(
+                global_event_id=7102,
+                mention_identifier=shared_mention,
+                mention_source_name="shared.example.com",
+            ),
+            GdeltMention(
+                global_event_id=7103,
+                mention_identifier=shared_mention,
+                mention_source_name="shared.example.com",
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    await ClusterService(db_session).build_and_materialise(20260324000000, 20260324010000)
+    await db_session.commit()
+
+    component = (await db_session.execute(select(ClusterComponent))).scalars().one()
+    cluster = (await db_session.execute(select(StoryCluster))).scalars().one()
+    assert component.current_cluster_id == cluster.cluster_id
+    assert component.current_table == "story_clusters"
+
+
+async def test_build_and_materialise_updates_component_soft_reference_for_root_cluster(
+    db_session,
+    monkeypatch,
+) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "cluster_candidate_min_source_urls", 1)
+    monkeypatch.setattr(settings, "cluster_candidate_min_domains", 1)
+    shared_mention = "https://shared.example.com/soft-root"
+    _add_many_events(
+        db_session,
+        start_event_id=720000,
+        count=5001,
+        source_url="https://root.example.com/story",
+        sql_date=20260324,
+        date_added=20260324000000,
+    )
+    for event_id in range(720000, 725001):
+        db_session.add(
+            GdeltMention(
+                global_event_id=event_id,
+                mention_identifier=shared_mention,
+                mention_source_name="shared.example.com",
+            )
+        )
+    await db_session.commit()
+
+    await ClusterService(db_session).build_and_materialise(20260324000000, 20260325000000)
+    await db_session.commit()
+
+    component = (await db_session.execute(select(ClusterComponent))).scalars().one()
+    cluster = (await db_session.execute(select(RootCluster))).scalars().one()
+    assert component.current_cluster_id == cluster.cluster_id
+    assert component.current_table == "root_clusters"
+
+
+async def test_validate_materialized_consistency_fails_on_duplicate_cluster_ids(db_session) -> None:
+    service = ClusterService(db_session)
+    now = datetime(2026, 3, 24, tzinfo=UTC)
+    db_session.add_all(
+        [
+            StoryCluster(
+                cluster_id="dup-cluster", source_url="https://a.example.com", computed_at=now
+            ),
+            RootCluster(
+                cluster_id="dup-cluster", source_url="https://b.example.com", computed_at=now
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    with pytest.raises(ClusterBuildError):
+        await service._validate_materialized_consistency()
+
+
+async def test_validate_materialized_consistency_fails_on_missing_soft_link(db_session) -> None:
+    service = ClusterService(db_session)
+    now = datetime(2026, 3, 24, tzinfo=UTC)
+    db_session.add(
+        ClusterComponent(
+            component_id="component-1",
+            status="active",
+            anchor_source_url="https://anchor.example.com/original-story",
+            component_source_urls=["https://anchor.example.com/original-story"],
+            anchor_locked_at=now,
+            first_seen_at=now,
+            last_seen_at=now,
+            current_cluster_id="missing-cluster",
+            current_table="story_clusters",
+            current_computed_at=now,
+            has_gkg=False,
+        )
+    )
+    await db_session.commit()
+
+    with pytest.raises(ClusterBuildError):
+        await service._validate_materialized_consistency()
+
+
+async def test_build_and_materialise_persists_no_gkg_component_state(db_session, mocker) -> None:
+    shared_mention = "https://shared.example.com/no-gkg"
+    db_session.add_all(
+        [
+            _make_event(8101, source_url="https://a.example.com/story", date_added=20260324000000),
+            _make_event(8102, source_url="https://b.example.com/story", date_added=20260324000100),
+            _make_event(8103, source_url="https://c.example.com/story", date_added=20260324000200),
+            GdeltMention(
+                global_event_id=8101,
+                mention_identifier=shared_mention,
+                mention_source_name="shared.example.com",
+            ),
+            GdeltMention(
+                global_event_id=8102,
+                mention_identifier=shared_mention,
+                mention_source_name="shared.example.com",
+            ),
+            GdeltMention(
+                global_event_id=8103,
+                mention_identifier=shared_mention,
+                mention_source_name="shared.example.com",
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    logger_info = mocker.patch("app.services.cluster_service.logger.info")
+
+    count = await ClusterService(db_session).build_and_materialise(20260324000000, 20260324010000)
+    await db_session.commit()
+
+    component = (await db_session.execute(select(ClusterComponent))).scalars().one()
+    cluster = (await db_session.execute(select(StoryCluster))).scalars().one()
+
+    assert count == 1
+    assert cluster.cluster_id
+    assert component.has_gkg is False
+    assert any(
+        call.args and call.args[0] == "cluster_component_no_gkg"
+        for call in logger_info.call_args_list
+    )
+
+
+async def test_new_component_is_not_aged_as_missed_in_creation_run(db_session, monkeypatch) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "cluster_component_stale_after_missing_runs", 1)
+
+    shared_mention = "https://shared.example.com/new-component"
+    db_session.add_all(
+        [
+            _make_event(9101, source_url="https://a.example.com/story", date_added=20260324000000),
+            _make_event(9102, source_url="https://b.example.com/story", date_added=20260324000100),
+            GdeltMention(
+                global_event_id=9101,
+                mention_identifier=shared_mention,
+                mention_source_name="shared.example.com",
+            ),
+            GdeltMention(
+                global_event_id=9102,
+                mention_identifier=shared_mention,
+                mention_source_name="shared.example.com",
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    await ClusterService(db_session).build_and_materialise(20260324000000, 20260324010000)
+    await db_session.commit()
+
+    component = (await db_session.execute(select(ClusterComponent))).scalars().one()
+    assert component.status == "active"
+    assert component.missing_run_count == 0
+
+
+async def test_zero_result_window_ages_historical_components_to_stale(
+    db_session, monkeypatch
+) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "cluster_component_stale_after_missing_runs", 1)
+
+    now = datetime(2026, 3, 24, tzinfo=UTC)
+    db_session.add(
+        ClusterComponent(
+            component_id="component-1",
+            status="active",
+            anchor_source_url="https://anchor.example.com/story",
+            component_source_urls=["https://anchor.example.com/story"],
+            anchor_locked_at=now,
+            first_seen_at=now,
+            last_seen_at=now,
+            has_gkg=False,
+        )
+    )
+    db_session.add(
+        ClusterComponentEvent(
+            component_id="component-1",
+            event_id="9991",
+            first_seen_at=now,
+            last_seen_at=now,
+            is_active=True,
+        )
+    )
+    await db_session.commit()
+
+    count = await ClusterService(db_session).build_and_materialise(20260325000000, 20260325010000)
+    await db_session.commit()
+
+    component = (
+        (
+            await db_session.execute(
+                select(ClusterComponent).where(ClusterComponent.component_id == "component-1")
+            )
+        )
+        .scalars()
+        .one()
+    )
+    assert count == 0
+    assert component.status == "stale"
+    assert component.missing_run_count == 1
 
 
 async def test_build_cluster_deduplicates_mention_count_with_shared_identifier(db_session) -> None:

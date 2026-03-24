@@ -16,7 +16,7 @@ import uuid  # used in FilterMappingCache.id default
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import JSON, BigInteger, DateTime, Float, Index, Integer, String, Text
+from sqlalchemy import Boolean, JSON, BigInteger, DateTime, Float, Index, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -309,3 +309,63 @@ class RootCluster(Base):
     )
 
     __table_args__ = (Index("ix_root_clusters_topic_score", "topic_score"),)
+
+
+class ClusterComponent(Base):
+    """Persistent cluster component identity across cluster materialisation runs."""
+
+    __tablename__ = "cluster_components"
+    __table_args__ = (
+        Index("ix_cluster_components_status", "status"),
+        Index("ix_cluster_components_merged_into_component_id", "merged_into_component_id"),
+    )
+
+    component_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    anchor_source_url: Mapped[str] = mapped_column(Text, nullable=False)
+    component_source_urls: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    anchor_locked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    seed_event_ids: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    missing_run_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    merged_into_component_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    current_cluster_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    current_table: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    current_computed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    has_gkg: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    merge_evidence: Mapped[list[Any] | dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+
+class ClusterComponentEvent(Base):
+    """Event membership history for persistent cluster components."""
+
+    __tablename__ = "cluster_component_events"
+    __table_args__ = (
+        Index("ix_cluster_component_events_component_id", "component_id"),
+        Index("ix_cluster_component_events_event_id", "event_id"),
+        Index(
+            "uq_cluster_component_events_component_event",
+            "component_id",
+            "event_id",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    component_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    event_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)

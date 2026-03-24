@@ -177,3 +177,15 @@ async def test_upsert_event_date_ref_fields_null_by_default(db_session):
     assert row is not None
     assert row.event_date_ref_start is None
     assert row.event_date_ref_end is None
+
+
+async def test_cluster_repository_ignores_merge_evidence_transient_key(db_session):
+    repo = ClusterRepository(db_session)
+    cluster = _make_cluster("c-merge-evidence", 7.0)
+    cluster["merge_evidence"] = [{"mention_overlap": 2}]
+    await repo.upsert(cluster)
+    await db_session.commit()
+
+    clusters, total = await repo.search()
+    assert total >= 1
+    assert any(cluster.cluster_id == "c-merge-evidence" for cluster in clusters)

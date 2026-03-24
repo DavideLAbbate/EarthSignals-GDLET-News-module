@@ -31,7 +31,7 @@ class ClusterRepository:
 
     # Keys that are used internally during cluster building/merging but are not DB columns
     _TRANSIENT_KEYS: frozenset[str] = frozenset(
-        {"gkg_doc_count", "component_source_urls", "component_domains"}
+        {"gkg_doc_count", "component_source_urls", "component_domains", "merge_evidence"}
     )
 
     async def upsert(self, cluster_dict: dict[str, Any]) -> None:
@@ -191,3 +191,15 @@ class ClusterRepository:
             delete(StoryCluster).where(StoryCluster.cluster_id.in_(cluster_ids))
         )
         return result.rowcount or 0
+
+    async def list_cluster_ids(self) -> set[str]:
+        """Return all materialized story cluster IDs."""
+        result = await self._session.execute(select(StoryCluster.cluster_id))
+        return set(result.scalars().all())
+
+    async def exists_by_cluster_id(self, cluster_id: str) -> bool:
+        """Return whether a story cluster exists for the given cluster_id."""
+        result = await self._session.execute(
+            select(StoryCluster.id).where(StoryCluster.cluster_id == cluster_id).limit(1)
+        )
+        return result.scalar_one_or_none() is not None

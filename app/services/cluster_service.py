@@ -16,7 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.exceptions import ClusterBuildError
 from app.core.logging import get_logger
-from app.db.models import GdeltEvent, GdeltGkg, GdeltMention
+from app.db.models import ClusterComponent, GdeltEvent, GdeltGkg, GdeltMention
+from app.db.repositories.cluster_component_repository import ClusterComponentRepository
 from app.db.repositories.cluster_repository import ClusterRepository
 from app.db.repositories.gkg_repository import GkgRepository
 from app.db.repositories.mentions_repository import MentionsRepository
@@ -45,6 +46,7 @@ class ClusterService:
         self._mentions_repo = MentionsRepository(session)
         self._gkg_repo = GkgRepository(session)
         self._cluster_repo = ClusterRepository(session)
+        self._cluster_component_repo = ClusterComponentRepository(session)
         self._root_cluster_repo = RootClusterRepository(session)
 
     async def _score_source_urls(
@@ -514,6 +516,400 @@ class ClusterService:
             "computed_at": datetime.now(UTC),
         }
 
+    async def _build_fallback_source_url_cluster_rows(
+        self,
+        since_date_added: int,
+        until_date_added: int | None,
+    ) -> list[dict[str, Any]]:
+        """Build legacy single-source cluster rows when no component candidates survive."""
+        candidates = await self._score_source_urls(since_date_added, until_date_added)
+        if not candidates:
+            return []
+
+        source_urls = [candidate["source_url"] for candidate in candidates]
+        events_by_url = await self._batch_collect_events(
+            source_urls, since_date_added, until_date_added
+        )
+        event_ids = [event.global_event_id for events in events_by_url.values() for event in events]
+        mentions_by_event = await self._batch_collect_mentions(event_ids)
+        source_gkg_by_url = await self._batch_collect_gkg(source_urls)
+
+        cluster_rows: list[dict[str, Any]] = []
+        for candidate in candidates:
+            source_url = candidate["source_url"]
+            events = events_by_url.get(source_url, [])
+            mentions = [
+                mention
+                for event in events
+                for mention in mentions_by_event.get(event.global_event_id, [])
+            ]
+            cluster_row = self._build_cluster(
+                {
+                    "source_url": source_url,
+                    "cluster_id": _component_cluster_id(
+                        [event.global_event_id for event in events]
+                    ),
+                    "event_count": len(events),
+                    "num_articles": sum(event.num_articles or 0 for event in events),
+                    "num_mentions": sum(event.num_mentions or 0 for event in events),
+                    "num_sources": sum(event.num_sources or 0 for event in events),
+                    "topic_score": candidate["topic_score"],
+                },
+                events,
+                mentions,
+                source_gkg_by_url.get(source_url, []),
+            )
+            cluster_row["component_source_urls"] = [source_url]
+            cluster_row["component_domains"] = [urlparse(source_url).netloc.lower()]
+            cluster_rows.append(cluster_row)
+
+        return cluster_rows
+
+    def _build_reconciliation_payloads(
+        self,
+        story_cluster_rows: list[dict[str, Any]],
+        root_cluster_rows: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Return current-run payloads for persistent-component reconciliation."""
+        payloads: list[dict[str, Any]] = []
+        for table_name, rows in (
+            ("story_clusters", story_cluster_rows),
+            ("root_clusters", root_cluster_rows),
+        ):
+            for row in rows:
+                payloads.append(
+                    {
+                        "cluster_id": row["cluster_id"],
+                        "table_name": table_name,
+                        "source_url": row["source_url"],
+                        "event_ids": {str(event_id) for event_id in (row.get("event_ids") or [])},
+                        "computed_at": row.get("computed_at"),
+                        "has_gkg": bool(row.get("gkg_doc_count") or row.get("themes")),
+                        "merge_evidence": row.get("merge_evidence"),
+                        "component_source_urls": list(
+                            row.get("component_source_urls") or [row["source_url"]]
+                        ),
+                    }
+                )
+        return payloads
+
+    def _event_overlap(
+        self,
+        current_event_ids: set[str],
+        historical_event_ids: set[str],
+    ) -> dict[str, float | int]:
+        """Return overlap metrics between current and historical component membership."""
+        overlap_count = len(current_event_ids & historical_event_ids)
+        historical_ratio = (
+            overlap_count / len(historical_event_ids) if historical_event_ids else 0.0
+        )
+        current_ratio = overlap_count / len(current_event_ids) if current_event_ids else 0.0
+        return {
+            "count": overlap_count,
+            "historical_ratio": historical_ratio,
+            "current_ratio": current_ratio,
+        }
+
+    def _choose_canonical_component(self, candidates: list[dict[str, Any]]) -> dict[str, Any]:
+        """Choose the oldest persistent component as the canonical continuity key."""
+        return min(
+            candidates,
+            key=lambda candidate: (
+                candidate["first_seen_at"],
+                candidate["component_id"],
+            ),
+        )
+
+    def _find_matching_components(
+        self,
+        current_payload: dict[str, Any],
+        persisted_components: list[dict[str, Any]],
+        active_membership: dict[str, set[str]],
+    ) -> list[dict[str, Any]]:
+        """Return historical components sharing at least one active event with the current payload."""
+        matches: list[dict[str, Any]] = []
+        current_event_ids = current_payload["event_ids"]
+        current_source_url = current_payload.get("source_url")
+        for component in persisted_components:
+            overlap = self._event_overlap(
+                current_event_ids,
+                active_membership.get(component["component_id"], set()),
+            )
+            if int(overlap["count"]) == 0:
+                continue
+            matches.append({**component, "overlap": overlap})
+        if not matches and current_source_url:
+            for component in persisted_components:
+                source_urls = set(component.get("component_source_urls") or [])
+                if (
+                    current_source_url != component.get("anchor_source_url")
+                    and current_source_url not in source_urls
+                ):
+                    continue
+                matches.append(
+                    {
+                        **component,
+                        "overlap": {"count": 0, "historical_ratio": 0.0, "current_ratio": 0.0},
+                    }
+                )
+        matches.sort(
+            key=lambda match: (
+                -int(match["overlap"]["count"]),
+                match["first_seen_at"],
+                match["component_id"],
+            )
+        )
+        return matches
+
+    def _find_split_candidates(
+        self,
+        historical_component: dict[str, Any],
+        current_payloads: list[dict[str, Any]],
+        active_membership: dict[str, set[str]],
+        *,
+        overlap_min: int,
+        overlap_ratio: float,
+    ) -> list[dict[str, Any]]:
+        """Return current payloads that capture enough historical membership to indicate a split."""
+        historical_event_ids = active_membership.get(historical_component["component_id"], set())
+        split_candidates: list[dict[str, Any]] = []
+        for payload in current_payloads:
+            overlap = self._event_overlap(payload["event_ids"], historical_event_ids)
+            if int(overlap["count"]) < overlap_min:
+                continue
+            if float(overlap["historical_ratio"]) < overlap_ratio:
+                continue
+            split_candidates.append({**payload, "overlap": overlap})
+        split_candidates.sort(
+            key=lambda candidate: (
+                -float(candidate["overlap"]["historical_ratio"]),
+                -int(candidate["overlap"]["count"]),
+                candidate["cluster_id"],
+            )
+        )
+        return split_candidates
+
+    def _should_mark_component_split(
+        self,
+        historical_component: dict[str, Any],
+        current_payloads: list[dict[str, Any]],
+        active_membership: dict[str, set[str]],
+        *,
+        overlap_min: int,
+        continuity_ratio: float,
+    ) -> bool:
+        """Return whether history branches without a dominant continuity match."""
+        historical_event_ids = active_membership.get(historical_component["component_id"], set())
+        meaningful_overlaps = [
+            self._event_overlap(payload["event_ids"], historical_event_ids)
+            for payload in current_payloads
+        ]
+        meaningful_overlaps = [
+            overlap for overlap in meaningful_overlaps if int(overlap["count"]) >= overlap_min
+        ]
+        if len(meaningful_overlaps) < 2:
+            return False
+        return (
+            max(float(overlap["historical_ratio"]) for overlap in meaningful_overlaps)
+            < continuity_ratio
+        )
+
+    def _serialize_reconcilable_component(self, component: Any) -> dict[str, Any]:
+        """Return the reconciliation fields needed from a persisted component row."""
+        return {
+            "component_id": component.component_id,
+            "first_seen_at": component.first_seen_at,
+            "anchor_source_url": component.anchor_source_url,
+            "component_source_urls": list(component.component_source_urls or []),
+            "status": component.status,
+            "missing_run_count": component.missing_run_count,
+            "current_cluster_id": component.current_cluster_id,
+            "current_table": component.current_table,
+        }
+
+    async def _delete_previous_materialization_if_needed(
+        self,
+        component: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> None:
+        """Remove a previous materialized row when the component now points elsewhere."""
+        previous_cluster_id = component.get("current_cluster_id")
+        previous_table = component.get("current_table")
+        if not previous_cluster_id or not previous_table:
+            return
+        if previous_cluster_id == payload["cluster_id"] and previous_table == payload["table_name"]:
+            return
+        if previous_table == "story_clusters":
+            await self._cluster_repo.delete_by_cluster_ids({previous_cluster_id})
+        elif previous_table == "root_clusters":
+            await self._root_cluster_repo.delete_by_cluster_ids({previous_cluster_id})
+
+    async def _reconcile_persistent_components(
+        self,
+        reconciliation_payloads: list[dict[str, Any]],
+    ) -> None:
+        """Reconcile current materialized rows against persistent component state."""
+        settings = get_settings()
+        split_observed_at = max(
+            (
+                payload["computed_at"]
+                for payload in reconciliation_payloads
+                if payload.get("computed_at")
+            ),
+            default=datetime.now(UTC),
+        )
+        persisted_components = [
+            self._serialize_reconcilable_component(component)
+            for component in await self._cluster_component_repo.list_reconcilable_components()
+        ]
+        active_membership = await self._cluster_component_repo.list_active_event_membership()
+        split_component_ids: set[str] = set()
+        for component in persisted_components:
+            if not self._should_mark_component_split(
+                component,
+                reconciliation_payloads,
+                active_membership,
+                overlap_min=settings.cluster_component_split_overlap_min,
+                continuity_ratio=settings.cluster_component_split_overlap_ratio,
+            ):
+                continue
+            split_component_ids.add(component["component_id"])
+            await self._cluster_component_repo.mark_split(
+                component["component_id"], split_observed_at
+            )
+
+        matched_component_ids: set[str] = set()
+        for payload in reconciliation_payloads:
+            observed_at = payload["computed_at"] or datetime.now(UTC)
+            matches = self._find_matching_components(
+                payload,
+                [
+                    component
+                    for component in persisted_components
+                    if component["component_id"] not in split_component_ids
+                ],
+                active_membership,
+            )
+            if not matches:
+                component_id = await self._cluster_component_repo.create_component(
+                    anchor_source_url=payload["source_url"],
+                    component_source_urls=payload["component_source_urls"],
+                    seed_event_ids=sorted(payload["event_ids"]),
+                    event_ids=sorted(payload["event_ids"]),
+                    observed_at=observed_at,
+                    has_gkg=payload["has_gkg"],
+                    merge_evidence=payload["merge_evidence"],
+                )
+                payload["component_id"] = component_id
+                if not payload["has_gkg"]:
+                    logger.info(
+                        "cluster_component_no_gkg",
+                        component_id=component_id,
+                        cluster_id=payload["cluster_id"],
+                        source_urls=payload["component_source_urls"],
+                    )
+                persisted_components.append(
+                    {
+                        "component_id": component_id,
+                        "first_seen_at": observed_at,
+                        "anchor_source_url": payload["source_url"],
+                        "component_source_urls": payload["component_source_urls"],
+                        "status": "active",
+                        "missing_run_count": 0,
+                        "current_cluster_id": None,
+                        "current_table": None,
+                    }
+                )
+                active_membership[component_id] = set(payload["event_ids"])
+                matched_component_ids.add(component_id)
+                continue
+
+            canonical = self._choose_canonical_component(matches)
+            payload["component_id"] = canonical["component_id"]
+            matched_component_ids.add(canonical["component_id"])
+            await self._delete_previous_materialization_if_needed(canonical, payload)
+            await self._cluster_component_repo.mark_active(
+                canonical["component_id"],
+                observed_at,
+                has_gkg=payload["has_gkg"],
+                merge_evidence=payload["merge_evidence"],
+                component_source_urls=payload["component_source_urls"],
+            )
+            if not payload["has_gkg"]:
+                logger.info(
+                    "cluster_component_no_gkg",
+                    component_id=canonical["component_id"],
+                    cluster_id=payload["cluster_id"],
+                    source_urls=payload["component_source_urls"],
+                )
+            await self._cluster_component_repo.replace_active_event_membership(
+                canonical["component_id"],
+                sorted(payload["event_ids"]),
+                observed_at,
+            )
+            active_membership[canonical["component_id"]] = set(payload["event_ids"])
+
+            for match in matches:
+                if match["component_id"] == canonical["component_id"]:
+                    continue
+                await self._cluster_component_repo.mark_merged_into(
+                    match["component_id"],
+                    canonical["component_id"],
+                    observed_at,
+                )
+                matched_component_ids.add(match["component_id"])
+                active_membership.pop(match["component_id"], None)
+
+        for component in persisted_components:
+            component_id = component["component_id"]
+            if component_id in matched_component_ids or component_id in split_component_ids:
+                continue
+            missing_run_count = int(component["missing_run_count"]) + 1
+            if missing_run_count >= settings.cluster_component_stale_after_missing_runs:
+                await self._cluster_component_repo.mark_stale(component_id, missing_run_count)
+            else:
+                await self._cluster_component_repo.update_missing_run_count(
+                    component_id,
+                    missing_run_count,
+                )
+
+    async def _validate_materialized_consistency(self) -> None:
+        """Fail the current run if materialized tables or soft links are inconsistent."""
+        story_ids = await self._cluster_repo.list_cluster_ids()
+        root_ids = await self._root_cluster_repo.list_cluster_ids()
+        overlap_ids = story_ids & root_ids
+        if overlap_ids:
+            raise ClusterBuildError(
+                "Materialized cluster consistency check failed",
+                detail=f"duplicate cluster_id across story/root tables: {sorted(overlap_ids)[0]}",
+            )
+
+        result = await self._session.execute(
+            select(ClusterComponent).where(ClusterComponent.status == "active")
+        )
+        for component in result.scalars().all():
+            if not component.current_cluster_id or not component.current_table:
+                raise ClusterBuildError(
+                    "Materialized cluster consistency check failed",
+                    detail=f"active component missing soft link: {component.component_id}",
+                )
+            if component.current_table == "story_clusters":
+                exists = await self._cluster_repo.exists_by_cluster_id(component.current_cluster_id)
+            elif component.current_table == "root_clusters":
+                exists = await self._root_cluster_repo.exists_by_cluster_id(
+                    component.current_cluster_id
+                )
+            else:
+                raise ClusterBuildError(
+                    "Materialized cluster consistency check failed",
+                    detail=f"active component points to unknown table: {component.component_id}",
+                )
+            if not exists:
+                raise ClusterBuildError(
+                    "Materialized cluster consistency check failed",
+                    detail=f"active component points to missing cluster row: {component.component_id}",
+                )
+
     async def build_and_materialise(
         self,
         since_dt: datetime | int,
@@ -539,6 +935,8 @@ class ClusterService:
                 since_date_added, until_date_added
             )
             if not windowed_events:
+                await self._reconcile_persistent_components([])
+                await self._validate_materialized_consistency()
                 return 0
 
             events_by_id = {event.global_event_id: event for event in windowed_events}
@@ -564,9 +962,6 @@ class ClusterService:
 
             components = self._derive_candidate_components(events_by_id, windowed_mentions)
             admitted_candidates = self._admit_component_candidates(components, events_by_id)
-            if not admitted_candidates:
-                return 0
-
             logger.info(
                 "cluster_phase_components",
                 discovered=len(components),
@@ -574,63 +969,76 @@ class ClusterService:
                 elapsed_s=round(time.monotonic() - t_mentions, 2),
             )
 
-            component_source_urls = sorted(
-                {
-                    source_url
-                    for candidate in admitted_candidates
-                    for source_url in candidate["component"]["source_urls"]
-                }
-            )
-            source_gkg_by_url = await self._batch_collect_gkg(component_source_urls)
-            total_gkg = sum(len(v) for v in source_gkg_by_url.values())
-            t_gkg = time.monotonic()
-            logger.info(
-                "cluster_phase_gkg",
-                unique_identifiers=len(component_source_urls),
-                total_gkg=total_gkg,
-                elapsed_s=round(t_gkg - t_mentions, 2),
-            )
-
-            # ── Assemble per-component cluster dicts (pure Python, no more I/O) ──
             cluster_rows: list[dict[str, Any]] = []
-            for candidate in admitted_candidates:
-                component = candidate["component"]
-                events = candidate["events"]
-                component_urls = sorted(component["source_urls"])
-                representative_url = component_urls[0]
-                mentions: list[GdeltMention] = [
-                    mention
-                    for event in events
-                    for mention in mentions_by_event.get(event.global_event_id, [])
-                ]
-                source_gkg_rows = [
-                    row
-                    for source_url in component_urls
-                    for row in source_gkg_by_url.get(source_url, [])
-                ]
-                cluster_row = self._build_cluster(
+            if admitted_candidates:
+                component_source_urls = sorted(
                     {
-                        "source_url": representative_url,
-                        "cluster_id": _component_cluster_id(component["event_ids"]),
-                        "event_count": len(component["event_ids"]),
-                        "num_articles": sum(event.num_articles or 0 for event in events),
-                        "num_mentions": sum(event.num_mentions or 0 for event in events),
-                        "num_sources": sum(event.num_sources or 0 for event in events),
-                        "topic_score": candidate["topic_score"],
-                    },
-                    events,
-                    mentions,
-                    source_gkg_rows,
-                )
-                cluster_row["component_source_urls"] = component_urls
-                cluster_row["component_domains"] = sorted(
-                    {
-                        parsed.netloc.lower()
-                        for parsed in (urlparse(source_url) for source_url in component_urls)
-                        if parsed.netloc
+                        source_url
+                        for candidate in admitted_candidates
+                        for source_url in candidate["component"]["source_urls"]
                     }
                 )
-                cluster_rows.append(cluster_row)
+                source_gkg_by_url = await self._batch_collect_gkg(component_source_urls)
+                total_gkg = sum(len(v) for v in source_gkg_by_url.values())
+                t_gkg = time.monotonic()
+                logger.info(
+                    "cluster_phase_gkg",
+                    unique_identifiers=len(component_source_urls),
+                    total_gkg=total_gkg,
+                    elapsed_s=round(t_gkg - t_mentions, 2),
+                )
+
+                # ── Assemble per-component cluster dicts (pure Python, no more I/O) ──
+                for candidate in admitted_candidates:
+                    component = candidate["component"]
+                    events = candidate["events"]
+                    component_urls = sorted(component["source_urls"])
+                    representative_url = component_urls[0]
+                    mentions: list[GdeltMention] = [
+                        mention
+                        for event in events
+                        for mention in mentions_by_event.get(event.global_event_id, [])
+                    ]
+                    source_gkg_rows = [
+                        row
+                        for source_url in component_urls
+                        for row in source_gkg_by_url.get(source_url, [])
+                    ]
+                    cluster_row = self._build_cluster(
+                        {
+                            "source_url": representative_url,
+                            "cluster_id": _component_cluster_id(component["event_ids"]),
+                            "event_count": len(component["event_ids"]),
+                            "num_articles": sum(event.num_articles or 0 for event in events),
+                            "num_mentions": sum(event.num_mentions or 0 for event in events),
+                            "num_sources": sum(event.num_sources or 0 for event in events),
+                            "topic_score": candidate["topic_score"],
+                        },
+                        events,
+                        mentions,
+                        source_gkg_rows,
+                    )
+                    cluster_row["component_source_urls"] = component_urls
+                    cluster_row["component_domains"] = sorted(
+                        {
+                            parsed.netloc.lower()
+                            for parsed in (urlparse(source_url) for source_url in component_urls)
+                            if parsed.netloc
+                        }
+                    )
+                    cluster_rows.append(cluster_row)
+            else:
+                t_gkg = time.monotonic()
+                cluster_rows = await self._build_fallback_source_url_cluster_rows(
+                    since_date_added,
+                    until_date_added,
+                )
+                logger.info(
+                    "cluster_phase_gkg",
+                    unique_identifiers=len({row["source_url"] for row in cluster_rows}),
+                    total_gkg=sum(row.get("gkg_doc_count") or 0 for row in cluster_rows),
+                    elapsed_s=round(time.monotonic() - t_mentions, 2),
+                )
             t_build = time.monotonic()
             logger.info(
                 "cluster_phase_build",
@@ -656,9 +1064,6 @@ class ClusterService:
                 elapsed_s=round(t_merge - t_build, 2),
             )
 
-            if not cluster_rows:
-                return 0
-
             settings = get_settings()
             root_cluster_rows = [
                 cluster
@@ -676,6 +1081,11 @@ class ClusterService:
                 story_clusters=len(story_cluster_rows),
                 threshold=settings.root_cluster_min_event_count,
             )
+
+            reconciliation_payloads = self._build_reconciliation_payloads(
+                story_cluster_rows, root_cluster_rows
+            )
+            await self._reconcile_persistent_components(reconciliation_payloads)
 
             inserted = 0
             if story_cluster_rows:
@@ -697,6 +1107,18 @@ class ClusterService:
                 deleted_from_root=deleted_from_root,
                 deleted_from_story=deleted_from_story,
             )
+
+            for payload in reconciliation_payloads:
+                if not payload.get("component_id"):
+                    continue
+                await self._cluster_component_repo.update_current_materialization(
+                    component_id=payload["component_id"],
+                    cluster_id=payload["cluster_id"],
+                    table_name=payload["table_name"],
+                    computed_at=payload["computed_at"],
+                )
+
+            await self._validate_materialized_consistency()
 
             t_upsert = time.monotonic()
             logger.info(

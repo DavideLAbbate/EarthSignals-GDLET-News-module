@@ -52,3 +52,16 @@ async def test_root_repository_delete_by_cluster_ids(db_session) -> None:
     assert deleted == 1
     assert total == 1
     assert [row.cluster_id for row in rows] == ["root-keep"]
+
+
+async def test_root_repository_ignores_merge_evidence_transient_key(db_session) -> None:
+    repo = RootClusterRepository(db_session)
+
+    await repo.upsert(
+        {**_make_root_cluster("root-merge-evidence", 9.0), "merge_evidence": [{"jaccard": 0.7}]}
+    )
+    await db_session.commit()
+
+    rows, total = await repo.search()
+    assert total == 1
+    assert rows[0].cluster_id == "root-merge-evidence"

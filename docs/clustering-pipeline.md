@@ -22,7 +22,7 @@
 
 ## 1. Panoramica del sistema
 
-Il sistema scarica automaticamente i dataset pubblici di GDELT 2.0 (Global Database of Events, Language, and Tone), li normalizza, li arricchisce con metadati estratti dagli articoli originali, e li raggruppa in **cluster tematici** (`story_clusters`) che rappresentano storie giornalistiche distinte.
+Il sistema scarica automaticamente i dataset pubblici di GDELT 2.0 (Global Database of Events, Language, and Tone), li normalizza, li arricchisce con metadati estratti dagli articoli originali, e li raggruppa in cluster giornalistici persistenti. `story_clusters` e `root_clusters` rappresentano le proiezioni materializzate della run corrente; `cluster_components` conserva invece l'identita' immutabile (`component_id`), la membership storica e lo stato cross-run del componente.
 
 ### Componenti principali
 
@@ -31,7 +31,7 @@ Il sistema scarica automaticamente i dataset pubblici di GDELT 2.0 (Global Datab
 | `GdeltHttpClient` | Scarica i file export ZIP da GDELT ogni 15 minuti |
 | `IngestionService` | Parsea e inserisce eventi, mention e GKG nel DB |
 | `EventEnrichmentService` | Arricchisce ogni evento con titolo, summary, entità estratte dall'articolo originale |
-| `ClusterService` | Raggruppa gli eventi in cluster tematici |
+| `ClusterService` | Raggruppa gli eventi in componenti persistenti e cluster materializzati |
 | `ClusterMerger` | Fonde cluster sovrapposti con Union-Find |
 | `FilterService` + Claude | Normalizza query in linguaggio naturale in filtri CAMEO/FIPS |
 
@@ -75,21 +75,21 @@ Il sistema scarica automaticamente i dataset pubblici di GDELT 2.0 (Global Datab
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                      ClusterService                          │
-│  Finestra: ultimi 36 ore di date_added                      │
-│  Fase 1: topic scoring per source_url                       │
-│  Fase 2: raccolta eventi, mention, GKG per ogni candidato   │
-│  Fase 3: build del cluster (aggregazioni + scoring)         │
+│  Finestra: 36h ancorate all'ultimo date_added ingerito      │
+│  Fase 1: componenti evento-mention nella finestra           │
+│  Fase 2: raccolta eventi, mention, GKG per componente       │
+│  Fase 3: build del cluster materiale                        │
 │  Fase 4: ClusterMerger (Union-Find)                         │
+│  Fase 5: riconciliazione con cluster_components             │
 └──────────────────────────┬──────────────────────────────────┘
                            │ INSERT ON CONFLICT DO UPDATE
                            ▼
-┌──────────────────────────────────────┐
-│  PostgreSQL                          │
-│  └── story_clusters                  │
-│      cluster_id, topic_score,        │
-│      themes, persons, orgs,          │
-│      severity, tone, locations ...   │
-└──────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│  PostgreSQL                                                  │
+│  ├── cluster_components                                       │
+│  ├── story_clusters                                           │
+│  └── root_clusters                                            │
+└──────────────────────────────────────────────────────────────┘
                            │
                            ▼
 ┌──────────────────────────────────────┐
@@ -194,29 +194,27 @@ source_url
 
 ### 5.1 Finestra temporale
 
-Il `ClusterService` opera su una finestra di **36 ore** calcolata su `date_added` dell'evento. Questo garantisce che ogni run giornaliero copra eventi pubblicati nelle ultime ore senza perdere nulla per ritardi di ingestion.
+Il `ClusterService` opera su una finestra di 36 ore calcolata su `date_added`, ma la finestra e' ancorata all'ultimo `date_added` realmente presente in `gdelt_events`, non all'orologio di sistema.
 
-### 5.2 Fase 1: Candidate scoring per `source_url`
+### 5.2 Fase 1: component discovery
 
-Ogni `source_url` distinta nella finestra temporale diventa un candidato cluster. Il sistema aggrega:
-- `event_count` — numero di eventi con quella URL
-- `num_articles`, `num_mentions`, `num_sources` — somme dei campi GDELT
-
-Calcola il `topic_score` (vedi §6) e **scarta** i candidati con `topic_score < 4.0`.
+Gli eventi della finestra e i relativi `mention_identifiers` formano un grafo bipartito. Il sistema costruisce componenti connessi evento-mention e ammette solo quelli che superano gate strutturali su numero di eventi, numero di `source_url`, numero di domini, densita' e span temporale.
 
 ### 5.3 Fase 2: Raccolta dati
 
-Per ogni candidato qualificato:
-1. Fetch di tutti i `GdeltEvent` con quella `source_url`
-2. Fetch di tutti i `GdeltMention` per quei `global_event_id`
-3. Fetch di tutti i `GdeltGkg` dove `document_identifier` è in `mention_identifier`
+Per ogni componente qualificato:
+1. Fetch degli eventi del componente
+2. Fetch delle `GdeltMention` per gli eventi del componente
+3. Fetch dei `GdeltGkg` solo per i `source_url` osservati nel componente
 
 ### 5.4 Fase 3: Build del cluster
 
-Il `cluster_id` è deterministico:
+Il `cluster_id` materiale e' deterministico e derivato dagli `event_ids` ordinati:
 ```
-cluster_id = "{YYYYMMDD}_{sha256(source_url)[:12]}"
+cluster_id = sha256(",".join(sorted(event_ids)))[:24]
 ```
+
+La continuita' cross-run non vive in questo `cluster_id`, ma in `component_id`, salvato in `cluster_components` alla prima osservazione del componente.
 
 Aggregazioni per ogni cluster:
 
@@ -236,6 +234,8 @@ Aggregazioni per ogni cluster:
 | `last_mention_at` | Timestamp massimo tra le mention |
 | `mention_identifiers` | Union ordinata di tutti gli URL mention |
 | `distinct_mention_sources` | Union ordinata dei nomi testata |
+
+Se il componente non ha copertura GKG locale, il cluster viene comunque materializzato: `has_gkg = false` viene persistito in `cluster_components`, non viene fatto fallback verso documenti esterni al componente, e la condizione viene resa osservabile nei log.
 
 ### 5.5 Fase 4: Merge (ClusterMerger)
 
@@ -303,27 +303,58 @@ Questo cattura storie diverse ma tematicamente correlate (es. due proteste in pa
 
 ### 7.3 Strategia di fusione
 
-Il cluster con il `topic_score` più alto diventa l'**anchor** del gruppo:
+Il cluster con il `topic_score` piu' alto diventa l'anchor del gruppo:
 
 | Campo | Strategia |
 |---|---|
-| `cluster_id`, `source_url` | Dall'anchor |
-| `topic_score` | Massimo del gruppo |
+| `source_url` | Dall'anchor |
+| `cluster_id` | Ricalcolato dagli `event_ids` fusi |
+| `topic_score` | Ricalcolato sulla breadth del gruppo |
 | `event_count`, `num_articles`, `num_mentions`, `num_sources`, `mention_count` | Somma |
-| `avg_severity_score`, `document_tone_avg` | Media dei valori non-None |
+| `avg_severity_score`, `document_tone_avg` | Media/weighted mean dei valori non-None |
 | `first_mention_at` | Minimo |
 | `last_mention_at` | Massimo |
 | `mention_identifiers`, `themes`, `persons`, `organizations`, `gkg_locations`, `event_ids`, `distinct_mention_sources` | Unione ordinata |
 | `dominant_event_types`, `dominant_quad_classes`, `dominant_countries`, `dominant_locations` | Top-5 per frequenza sul gruppo fuso |
+| `merge_evidence` | Evidenza compatta di merge |
+
+### 7.4 Riconciliazione persistente
+
+Dopo il merge within-run, il sistema riconcilia i cluster correnti con `cluster_components`:
+
+- crea un nuovo `component_id` se non trova match storici
+- preserva il `component_id` storico se trova continuita'
+- in caso di multi-match, tiene il componente piu' vecchio e marca gli altri come `merged`
+- marca un componente storico come `split` quando la sua membership si ramifica in piu' componenti correnti e nessun ramo singolo supera la soglia di continuita' configurata
+- marca un componente come `stale` dopo `cluster_component_stale_after_missing_runs`
 
 ---
 
 ## 8. Struttura dei dati prodotti
 
+### Tabelle prodotte
+
+`cluster_components` e' il source of truth cross-run. `story_clusters` e `root_clusters` sono proiezioni materializzate della run corrente.
+
+```
+cluster_components
+component_id              STRING(36)   -- identita' immutabile del componente
+status                    STRING(20)   -- active / merged / split / stale
+anchor_source_url         TEXT         -- anchor originario
+component_source_urls     JSON[]       -- URL sorgente osservati nel tempo
+seed_event_ids            JSON[]       -- membership iniziale
+missing_run_count         INT          -- run consecutive mancate
+merged_into_component_id  STRING(36)   -- canonico in caso di merge
+current_cluster_id        STRING(100)  -- soft link alla proiezione corrente
+current_table             STRING(30)   -- story_clusters / root_clusters
+has_gkg                   BOOL         -- copertura GKG locale esplicita
+merge_evidence            JSON         -- audit trail compatto
+```
+
 ### Tabella `story_clusters`
 
 ```
-cluster_id              STRING(100)  — "{YYYYMMDD}_{sha256[:12]}"
+cluster_id              STRING(100)  — hash degli event_ids ordinati
 source_url              TEXT         — URL anchor del cluster
 event_count             INT          — eventi aggregati
 num_articles            INT          — articoli totali
@@ -348,6 +379,10 @@ organizations           JSON[]       — organizzazioni GKG unificate
 gkg_locations           JSON[]       — luoghi GKG unificati
 computed_at             DATETIME     — timestamp del run di clustering
 ```
+
+La run fallisce esplicitamente se lo stesso `cluster_id` appare sia in `story_clusters` sia in `root_clusters`, oppure se un componente attivo punta a una proiezione materiale inesistente. Il controllo avviene nella stessa transazione dell'upsert.
+
+I componenti in stato terminale (`merged`, `split`) restano disponibili per audit e debug, ma la policy prevista e' una retention temporale seguita da archiviazione o rimozione. La garbage collection non e' ancora implementata, ma la policy e' parte del modello operativo.
 
 ---
 

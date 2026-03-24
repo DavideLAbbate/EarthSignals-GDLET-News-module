@@ -10,7 +10,7 @@ L'obiettivo architetturale non e' soltanto aggregare record, ma imporre ordine s
 - il layer mention, che misura la propagazione mediatica;
 - il layer GKG, che misura il contenuto semantico del documento.
 
-Il risultato finale e' una vista materializzata della notizia, progettata per essere stabile nel tempo, ricostruibile in rerun successivi e accessibile via API senza dover ricomputare il grafo ogni volta.
+Il risultato finale e' una vista materializzata della notizia, progettata per essere stabile nel tempo, ricostruibile in rerun successivi e accessibile via API senza dover ricomputare il grafo ogni volta. La continuita' cross-run non vive piu' nei soli `story_clusters` e `root_clusters`: vive in `cluster_components`, che conserva l'identita' persistente del componente, la sua membership storica e i suoi stati di transizione.
 
 ## Principio architetturale
 
@@ -34,9 +34,9 @@ La conseguenza e' importante: il pipeline resta incrementale, spiegabile e idemp
 
 La creazione dei cluster puo' partire da due ingressi principali.
 
-Il primo e' lo scheduler applicativo. Il job schedulato richiama periodicamente la materializzazione dei cluster su una finestra mobile di 36 ore. Questa finestra e' piu' ampia dell'intervallo di scheduling per assorbire i ritardi fisiologici dell'ingestion GDELT e ridurre i buchi tra una run e la successiva. In questo modello, il clustering e' un processo ricorrente di consolidamento.
+Il primo e' lo scheduler applicativo. Il job schedulato richiama periodicamente la materializzazione dei cluster su una finestra mobile di 36 ore, ma la finestra non e' ancorata all'orologio di sistema: e' ancorata all'ultimo `date_added` realmente ingerito in `gdelt_events`. Questa finestra e' piu' ampia dell'intervallo di scheduling per assorbire i ritardi fisiologici dell'ingestion GDELT e ridurre i buchi tra una run e la successiva. In questo modello, il clustering e' un processo ricorrente di consolidamento.
 
-Il secondo ingresso e' la CLI manuale. Questo path serve per forzare una materializzazione su richiesta, utile per debug, backfill controllati o verifiche operative. Dal punto di vista architetturale, la CLI non introduce una semantica diversa: riusa lo stesso `ClusterService`, quindi il comportamento resta allineato al job schedulato.
+Il secondo ingresso e' la CLI manuale. Questo path serve per forzare una materializzazione su richiesta, utile per debug, backfill controllati o verifiche operative. Dal punto di vista architetturale, la CLI non introduce una semantica diversa: riusa lo stesso `ClusterService`, quindi il comportamento resta allineato al job schedulato. C'e' pero' un prerequisito operativo esplicito: il database deve essere migrato fino alla revisione che introduce `cluster_components` e `cluster_component_events`. Se queste tabelle non esistono ancora, il sistema fallisce in modo intenzionale e deve essere riallineato con `alembic upgrade head`.
 
 Questa convergenza su un unico servizio centrale e' una scelta di coerenza: cambia il trigger, non la logica.
 
@@ -97,7 +97,7 @@ Il punto architetturalmente piu' delicato e' il terzo. Il sistema non usa il GKG
 
 Per ogni candidato ammesso, il sistema costruisce una rappresentazione completa della storia locale emersa dal componente.
 
-Il `cluster_id` e' deterministico ed e' derivato dall'hash dell'intero insieme ordinato degli `event_ids` del componente. Questa decisione e' centrale. Significa che l'identita' del cluster non dipende dall'URL rappresentativo scelto in quella run, ma dalla struttura fattuale del componente. Se in un rerun cambia il `source_url` piu' rappresentativo, il cluster continua comunque a puntare allo stesso identificatore logico finche' il set di eventi resta lo stesso.
+Il `cluster_id` e' deterministico ed e' derivato dall'hash dell'intero insieme ordinato degli `event_ids` del componente. Ma questo identificatore non e' piu' la sorgente di verita' cross-run. La continuita' persistente e' delegata a `component_id`, assegnato alla prima osservazione del componente e conservato in `cluster_components` anche quando il cluster materiale cambia `cluster_id`, cresce, si fonde o cambia tabella di materializzazione. In questo schema, `story_clusters` e `root_clusters` sono proiezioni materializzate del run corrente; `cluster_components` e' la timeline persistente.
 
 Dentro questo cluster confluiscono tre famiglie di attributi.
 
@@ -107,7 +107,7 @@ La seconda famiglia e' interpretativa sul layer evento: tipi di evento dominanti
 
 La terza famiglia e' narrativa: fonti di mention, finestra temporale delle mention, temi, persone, organizzazioni, luoghi GKG e tono documentale medio. Serve a rendere il cluster leggibile come oggetto quasi editoriale, non solo analitico. Anche `mention_count` viene trattato in modo conservativo: rappresenta il numero di `mention_identifiers` distinti del componente, non la somma grezza delle righe mention, per evitare doppio conteggio quando lo stesso URL e' condiviso da piu' eventi.
 
-A questo punto il sistema non ha ancora creato una storia globale. Ha creato una buona unita' documentale consistente.
+A questo punto il sistema non ha ancora creato una storia globale. Ha creato una buona unita' documentale consistente. Se il componente non ha copertura GKG locale, resta comunque valido: viene materializzato con `has_gkg = false`, senza fallback verso documenti esterni al perimetro del componente, e questa assenza viene resa esplicita nei log applicativi.
 
 ## Fase 4: fusione in storie piu' ampie
 
@@ -148,9 +148,21 @@ La persistenza non e' append-only. E' idempotente e riconciliativa.
 
 Sia `story_clusters` sia `root_clusters` usano upsert keyed by `cluster_id`. Questo significa che ogni run non crea necessariamente nuove righe: aggiorna la versione corrente del cluster conosciuto. Se un cluster viene ricostruito con contenuto piu' ricco, viene riscritto in place dal punto di vista logico.
 
+La riconciliazione cross-run avviene pero' su un livello piu' profondo. `cluster_components` conserva:
+
+- `component_id` immutabile assegnato alla prima osservazione;
+- membership attiva e storica degli `event_ids`;
+- anchor originario e insieme degli URL sorgente osservati nel tempo;
+- stato del componente (`active`, `merged`, `split`, `stale`);
+- soft link verso la proiezione materiale corrente (`current_cluster_id`, `current_table`).
+
+Quando una run corrente incontra componenti storici multipli, il sistema sceglie come canonico il componente piu' vecchio e marca gli altri come `merged`. Quando la membership storica si ramifica e nessun ramo singolo raggiunge la soglia di continuita' configurata, il componente viene marcato `split`. Quando un componente non viene piu' osservato per `cluster_component_stale_after_missing_runs`, viene marcato `stale`.
+
+Un dettaglio importante e' che questa logica di aging non vale solo quando la run produce nuovi cluster. Vale anche nelle finestre a risultato zero. Se una finestra temporale non genera alcuna materializzazione, il sistema esegue comunque la fase di riconciliazione persistente e invecchia i componenti storici non osservati. Questo evita che componenti ormai scomparsi restino `active` indefinitamente solo perche' le run successive non hanno prodotto cluster.
+
 Ma il punto davvero importante e' la riconciliazione tra tabelle opposte. Un cluster puo' cambiare categoria tra una run e la successiva. Se prima era una story e poi supera la soglia root, deve sparire da `story_clusters` e comparire solo in `root_clusters`. Se il fenomeno si ridimensiona, deve accadere il contrario.
 
-Il sistema quindi non si limita a scrivere nella tabella giusta: elimina il `cluster_id` dalla tabella opposta. Questo garantisce mutua esclusione, evita duplicazioni semantiche e rende ogni cluster univocamente interpretabile.
+Il sistema quindi non si limita a scrivere nella tabella giusta: rimuove l'eventuale proiezione materiale precedente dello stesso `component_id` quando questo cambia `cluster_id` o cambia tabella di destinazione. Questo punto e' architetturalmente cruciale, perche' la pulizia non puo' piu' essere guidata da `source_url`: due cluster distinti possono condividere lo stesso URL rappresentativo senza essere lo stesso oggetto persistente. La mutua esclusione tra `story_clusters` e `root_clusters` viene quindi mantenuta tramite il soft link del componente persistente (`current_cluster_id`, `current_table`), non tramite euristiche sull'anchor URL. Inoltre il sistema esegue controlli di consistenza dentro la stessa transazione di materializzazione: fallisce la run se uno stesso `cluster_id` esiste in entrambe le tabelle o se un componente attivo punta a una proiezione materiale inesistente.
 
 ## Esposizione via API
 
@@ -174,6 +186,8 @@ Tra le piu' importanti:
 - il massimo gap temporale ammesso nel merge;
 - i parametri del merge per overlap mention, soglia Jaccard, cap dei temi e document frequency massima dei temi;
 - la soglia che separa story cluster e root cluster.
+- la soglia di continuita' che decide quando una storia storica resta continua vs quando diventa `split`;
+- il numero di run mancate prima della transizione a `stale`.
 
 Questo rende il sistema adattabile senza riscrivere il modello logico. In termini architetturali, il codice implementa il pipeline; la configurazione ne modula il comportamento operativo.
 
@@ -181,7 +195,7 @@ Questo rende il sistema adattabile senza riscrivere il modello logico. In termin
 
 Il sistema assume che i dati siano rumorosi, incompleti e a volte semanticamente fuorvianti. Per questo incorpora difese distribuite nel flusso.
 
-Scarta nodi mention structuralmente sbagliati gia' in ingresso. Costruisce candidati solo quando esiste connettivita' reale tra eventi e propagazione mediatica. Limita i merge con gate temporali e tipologici. Usa upsert per evitare duplicazioni su rerun. Riconcilia i category flip per mantenere mutua esclusione tra story e root.
+Scarta nodi mention structuralmente sbagliati gia' in ingresso. Costruisce candidati solo quando esiste connettivita' reale tra eventi e propagazione mediatica. Limita i merge con gate temporali e tipologici. Usa upsert per evitare duplicazioni su rerun. Riconcilia i category flip per mantenere mutua esclusione tra story e root. Esegue aging persistente anche nelle run vuote, cosi' lo stato storico continua a evolvere anche quando la finestra non produce cluster nuovi.
 
 Non elimina ogni possibile errore semantico, ma riduce i due rischi principali del clustering giornalistico:
 
@@ -189,6 +203,10 @@ Non elimina ogni possibile errore semantico, ma riduce i due rischi principali d
 - collasso eccessivo, quando storie diverse vengono fuse in un unico mostro narrativo.
 
 L'architettura non promette perfezione ontologica. Promette un equilibrio tra robustezza, costo computazionale, spiegabilita' e utilita' applicativa.
+
+## Retention degli stati terminali
+
+Gli stati terminali come `merged` e `split` sono utili per auditabilita', debug e ricostruzione storica, ma non devono crescere senza limite. La policy prevista e' semplice: i componenti in stato terminale vanno archiviati o rimossi dopo una retention operativa definita in giorni dalla transizione. Questa retention e' documentata ora come scelta architetturale, anche se il relativo job di garbage collection non e' ancora implementato nel pipeline.
 
 ## Sintesi finale
 

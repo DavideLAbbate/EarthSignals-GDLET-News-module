@@ -105,11 +105,14 @@ class Settings(BaseSettings):
     # Env var: ROOT_CLUSTER_MIN_EVENT_COUNT
     root_cluster_min_event_count: int = Field(default=5000, ge=0)
 
-    cluster_candidate_min_event_ids: int = Field(default=3, ge=1)
+    cluster_candidate_min_event_ids: int = Field(default=2, ge=1)
     cluster_candidate_min_source_urls: int = Field(default=2, ge=1)
     cluster_candidate_min_domains: int = Field(default=2, ge=1)
     cluster_candidate_max_event_span_hours: float = Field(default=24.0, ge=0.0)
     cluster_candidate_min_density: float = Field(default=0.0, ge=0.0, le=1.0)
+    cluster_component_stale_after_missing_runs: int = Field(default=3, ge=1)
+    cluster_component_split_overlap_min: int = Field(default=2, ge=1)
+    cluster_component_split_overlap_ratio: float = Field(default=0.6, ge=0.0, le=1.0)
 
     @field_validator("cluster_section_path_segments", mode="before")
     @classmethod

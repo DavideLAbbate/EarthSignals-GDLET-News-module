@@ -121,6 +121,7 @@ class ClusterMerger:
         # (e.g. "UNITED_STATES", "ECONOMY") carries no discriminative signal and
         # would generate O(n²) candidate pairs on its own, defeating the index.
         self._max_theme_df = max_theme_df
+        self._max_merge_evidence_items = 5
 
     def merge(self, clusters: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Merge related clusters into fused representations.
@@ -143,12 +144,16 @@ class ClusterMerger:
         self._comp_action_types: dict[int, set[str]] = {
             i: set(c.get("dominant_event_types") or []) for i, c in enumerate(clusters)
         }
+        self._comp_merge_evidence: dict[int, list[dict[str, Any]]] = {
+            i: list(c.get("merge_evidence") or [])[: self._max_merge_evidence_items]
+            for i, c in enumerate(clusters)
+        }
 
         self._union_by_mention_overlap(clusters, uf)
         self._union_by_theme_jaccard(clusters, uf)
 
         components = self._collect_components(clusters, uf)
-        return [self._fuse(group) for group in components.values()]
+        return [self._fuse(root, group) for root, group in components.items()]
 
     # ── graph construction ───────────────────────────────────────────────────
 
@@ -182,7 +187,16 @@ class ClusterMerger:
                     continue
                 if not self._shares_action_type(ri, rj):
                     continue
-                self._union_and_update_state(uf, i, j)
+                self._union_and_update_state(
+                    uf,
+                    i,
+                    j,
+                    evidence={
+                        "mention_overlap": count,
+                        "date_gap_days": self._date_gap_days(ri, rj),
+                        "shared_action_type": self._shared_action_type(ri, rj),
+                    },
+                )
 
     def _union_by_theme_jaccard(
         self,
@@ -240,7 +254,16 @@ class ClusterMerger:
                     continue
                 if not self._shares_action_type(ri, rj):
                     continue
-                self._union_and_update_state(uf, i, j)
+                self._union_and_update_state(
+                    uf,
+                    i,
+                    j,
+                    evidence={
+                        "jaccard": round(_jaccard(theme_sets[i], theme_sets[j]), 4),
+                        "date_gap_days": self._date_gap_days(ri, rj),
+                        "shared_action_type": self._shared_action_type(ri, rj),
+                    },
+                )
 
     # ── merge gates ──────────────────────────────────────────────────────────
 
@@ -262,6 +285,20 @@ class ClusterMerger:
         gap = max(0, (date_j_start - date_i_end).days, (date_i_start - date_j_end).days)
         return gap <= self._max_merge_day_gap
 
+    def _date_gap_days(self, ri: int, rj: int) -> int | None:
+        """Return the calendar-day gap between two component date envelopes."""
+        s_i = self._comp_date_start.get(ri)
+        e_i = self._comp_date_end.get(ri)
+        s_j = self._comp_date_start.get(rj)
+        e_j = self._comp_date_end.get(rj)
+        if any(v is None for v in (s_i, e_i, s_j, e_j)):
+            return None
+        date_i_start = _yyyymmdd_to_date(s_i)  # type: ignore[arg-type]
+        date_i_end = _yyyymmdd_to_date(e_i)  # type: ignore[arg-type]
+        date_j_start = _yyyymmdd_to_date(s_j)  # type: ignore[arg-type]
+        date_j_end = _yyyymmdd_to_date(e_j)  # type: ignore[arg-type]
+        return max(0, (date_j_start - date_i_end).days, (date_i_start - date_j_end).days)
+
     def _shares_action_type(self, ri: int, rj: int) -> bool:
         """Return True if the two components share at least one dominant event type.
 
@@ -273,9 +310,21 @@ class ClusterMerger:
             return True
         return bool(types_i & types_j)
 
+    def _shared_action_type(self, ri: int, rj: int) -> str | None:
+        """Return one deterministic shared action type, if any."""
+        shared = self._comp_action_types.get(ri, set()) & self._comp_action_types.get(rj, set())
+        return sorted(shared)[0] if shared else None
+
     # ── state update ─────────────────────────────────────────────────────────
 
-    def _union_and_update_state(self, uf: _UnionFind, i: int, j: int) -> None:
+    def _union_and_update_state(
+        self,
+        uf: _UnionFind,
+        i: int,
+        j: int,
+        *,
+        evidence: dict[str, Any] | None = None,
+    ) -> None:
         """Merge components i and j and update per-component gate state.
 
         Must be called instead of uf.union directly so the date-range and
@@ -303,6 +352,12 @@ class ClusterMerger:
         self._comp_action_types[new_root] = self._comp_action_types.get(
             ri, set()
         ) | self._comp_action_types.get(rj, set())
+        combined_evidence = (
+            self._comp_merge_evidence.get(ri, [])
+            + self._comp_merge_evidence.get(rj, [])
+            + ([evidence] if evidence is not None else [])
+        )
+        self._comp_merge_evidence[new_root] = combined_evidence[: self._max_merge_evidence_items]
 
     # ── component extraction ─────────────────────────────────────────────────
 
@@ -319,7 +374,7 @@ class ClusterMerger:
 
     # ── fusion ───────────────────────────────────────────────────────────────
 
-    def _fuse(self, group: list[dict[str, Any]]) -> dict[str, Any]:
+    def _fuse(self, root: int, group: list[dict[str, Any]]) -> dict[str, Any]:
         """Fuse a group of related clusters into one representative dict."""
         if len(group) == 1:
             fused = dict(group[0])
@@ -403,7 +458,20 @@ class ClusterMerger:
             fused[field] = _top_values(all_values)
 
         fused["computed_at"] = datetime.now(UTC)
+        fused["merge_evidence"] = self._merge_evidence_for_root(root, group)
         return fused
+
+    def _merge_evidence_for_root(
+        self, root: int, group: list[dict[str, Any]]
+    ) -> list[dict[str, Any]] | None:
+        """Return compact merge evidence for a fused multi-cluster group."""
+        evidence: list[dict[str, Any]] = []
+        for cluster in group:
+            evidence.extend(cluster.get("merge_evidence") or [])
+        if evidence:
+            return evidence[: self._max_merge_evidence_items]
+        root_evidence = self._comp_merge_evidence.get(root, [])
+        return root_evidence[: self._max_merge_evidence_items] if root_evidence else None
 
 
 # ── module-level helpers ──────────────────────────────────────────────────────
