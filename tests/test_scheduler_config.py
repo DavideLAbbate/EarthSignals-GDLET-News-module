@@ -81,6 +81,29 @@ def test_settings_accept_explicit_cluster_materialisation_overrides():
     assert settings.cluster_interval_minutes == 120
 
 
+def test_settings_accept_cluster_terminal_retention_override():
+    """Cluster terminal retention settings should be configurable."""
+    settings = Settings.model_validate(
+        {
+            **_base_settings_overrides(),
+            "cluster_terminal_state_retention_days": 14,
+        }
+    )
+
+    assert settings.cluster_terminal_state_retention_days == 14
+
+
+def test_settings_reject_invalid_cluster_terminal_retention_override():
+    """Cluster terminal retention days must be at least one day."""
+    with pytest.raises(ValidationError):
+        Settings.model_validate(
+            {
+                **_base_settings_overrides(),
+                "cluster_terminal_state_retention_days": 0,
+            }
+        )
+
+
 def test_add_sync_job_skips_metadata_sync_when_disabled():
     """Disabling metadata sync should avoid registering the gdelt sync job."""
     from app.scheduler import scheduler
@@ -105,8 +128,10 @@ def test_add_sync_job_skips_metadata_sync_when_disabled():
     assert "gdelt_sync" not in job_ids
     assert "gdelt_incremental_ingestion" in job_ids
     assert "gdelt_retention_cleanup" in job_ids
+    assert "gdelt_cluster_terminal_cleanup" in job_ids
     assert job_calls["gdelt_incremental_ingestion"]["max_instances"] == 1
     assert job_calls["gdelt_retention_cleanup"]["max_instances"] == 1
+    assert job_calls["gdelt_cluster_terminal_cleanup"]["max_instances"] == 1
 
 
 def test_add_sync_job_registers_event_enrichment_when_enabled():
@@ -142,6 +167,36 @@ def test_add_sync_job_registers_event_enrichment_when_enabled():
     }
     assert job_calls["gdelt_incremental_ingestion"]["max_instances"] == 1
     assert job_calls["gdelt_retention_cleanup"]["max_instances"] == 1
+    assert job_calls["gdelt_cluster_terminal_cleanup"]["max_instances"] == 1
+
+
+def test_add_sync_job_registers_cluster_terminal_cleanup():
+    """Cluster terminal cleanup should be registered as a dedicated daily job."""
+    from app.scheduler import scheduler
+
+    mock_scheduler = MagicMock()
+
+    with (
+        patch.object(scheduler, "get_settings") as mock_settings,
+        patch.object(scheduler, "_get_session_factory", return_value=MagicMock()),
+    ):
+        mock_settings.return_value.enable_metadata_sync = True
+        mock_settings.return_value.sync_interval_minutes = 15
+        mock_settings.return_value.ingestion_interval_minutes = 60
+        mock_settings.return_value.enable_event_enrichment = False
+        mock_settings.return_value.enable_cluster_materialisation = False
+
+        scheduler.add_sync_job(mock_scheduler)
+
+    cleanup_calls = [
+        call
+        for call in mock_scheduler.add_job.call_args_list
+        if call.kwargs.get("id") == "gdelt_cluster_terminal_cleanup"
+    ]
+    assert len(cleanup_calls) == 1
+    assert cleanup_calls[0].kwargs["hours"] == 24
+    assert cleanup_calls[0].kwargs["max_instances"] == 1
+    assert cleanup_calls[0].kwargs["replace_existing"] is True
 
 
 def test_add_sync_job_skips_event_enrichment_when_disabled():

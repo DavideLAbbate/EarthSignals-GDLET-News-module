@@ -113,6 +113,7 @@ class Settings(BaseSettings):
     cluster_component_stale_after_missing_runs: int = Field(default=3, ge=1)
     cluster_component_split_overlap_min: int = Field(default=2, ge=1)
     cluster_component_split_overlap_ratio: float = Field(default=0.6, ge=0.0, le=1.0)
+    cluster_terminal_state_retention_days: int = Field(default=7, ge=1)
 
     @field_validator("cluster_section_path_segments", mode="before")
     @classmethod

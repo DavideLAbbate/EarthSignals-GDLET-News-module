@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 
 from sqlalchemy import select
 
 from app.db.models import ClusterComponent, ClusterComponentEvent
+from app.core.config import Settings
 
 
 def test_cluster_component_model_fields() -> None:
@@ -28,6 +30,38 @@ def test_cluster_component_model_fields() -> None:
     assert row.status == "active"
     assert row.current_table == "story_clusters"
     assert len(row.component_source_urls) == 2
+
+
+def test_cluster_component_model_has_soft_link_index() -> None:
+    indexes = {
+        tuple(column.name for column in index.columns)
+        for index in ClusterComponent.__table__.indexes
+    }
+
+    assert ("current_table", "current_cluster_id") in indexes
+
+
+def test_settings_expose_cluster_terminal_state_retention_default() -> None:
+    settings = Settings.model_validate(
+        {
+            "anthropic_api_key": "test-anthropic-key",
+            "database_url": "sqlite+aiosqlite:///:memory:",
+            "api_key": "test-api-key",
+        }
+    )
+
+    assert settings.cluster_terminal_state_retention_days == 7
+
+
+def test_migration_015_adds_cluster_soft_link_index() -> None:
+    content = Path(
+        "alembic/versions/015_add_cluster_terminal_retention_and_soft_link_index.py"
+    ).read_text(encoding="utf-8")
+
+    assert "ix_cluster_components_current_table_cluster_id" in content
+    assert "current_table" in content
+    assert "current_cluster_id" in content
+    assert "create_index" in content
 
 
 def test_cluster_component_event_model_fields() -> None:

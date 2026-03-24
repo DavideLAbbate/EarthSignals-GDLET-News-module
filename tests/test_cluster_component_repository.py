@@ -143,6 +143,70 @@ async def test_repository_marks_component_merged_into(db_session) -> None:
     assert refreshed.last_seen_at == now
 
 
+async def test_repository_marks_component_merged_into_deactivates_memberships(db_session) -> None:
+    now = datetime(2026, 3, 24, tzinfo=UTC)
+    db_session.add(
+        ClusterComponent(
+            component_id="component-1",
+            status="active",
+            anchor_source_url="https://example.com/story",
+            component_source_urls=["https://example.com/story"],
+            anchor_locked_at=now,
+            first_seen_at=now,
+            last_seen_at=now,
+            current_cluster_id="cluster-1",
+            current_table="story_clusters",
+            current_computed_at=now,
+            has_gkg=False,
+        )
+    )
+    db_session.add_all(
+        [
+            ClusterComponentEvent(
+                component_id="component-1",
+                event_id="1001",
+                first_seen_at=now,
+                last_seen_at=now,
+                is_active=True,
+            ),
+            ClusterComponentEvent(
+                component_id="component-1",
+                event_id="1002",
+                first_seen_at=now,
+                last_seen_at=now,
+                is_active=True,
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    repo = ClusterComponentRepository(db_session)
+    later = datetime(2026, 3, 25, tzinfo=UTC)
+    await repo.mark_merged_into("component-1", "component-2", later)
+    await db_session.commit()
+
+    refreshed = await repo.get_by_component_id("component-1")
+    memberships = (
+        (
+            await db_session.execute(
+                select(ClusterComponentEvent).where(
+                    ClusterComponentEvent.component_id == "component-1"
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    assert refreshed is not None
+    assert refreshed.status == "merged"
+    assert refreshed.current_cluster_id is None
+    assert refreshed.current_table is None
+    assert refreshed.current_computed_at is None
+    assert all(membership.is_active is False for membership in memberships)
+    assert all(_as_utc(membership.last_seen_at) == later for membership in memberships)
+
+
 async def test_repository_marks_component_stale_with_missing_run_count(db_session) -> None:
     now = datetime(2026, 3, 24, tzinfo=UTC)
     component = ClusterComponent(
@@ -166,6 +230,61 @@ async def test_repository_marks_component_stale_with_missing_run_count(db_sessio
     assert refreshed is not None
     assert refreshed.status == "stale"
     assert refreshed.missing_run_count == 3
+
+
+async def test_repository_marks_component_split_deactivates_memberships(db_session) -> None:
+    now = datetime(2026, 3, 24, tzinfo=UTC)
+    db_session.add(
+        ClusterComponent(
+            component_id="component-1",
+            status="active",
+            anchor_source_url="https://example.com/story",
+            component_source_urls=["https://example.com/story"],
+            anchor_locked_at=now,
+            first_seen_at=now,
+            last_seen_at=now,
+            current_cluster_id="cluster-1",
+            current_table="story_clusters",
+            current_computed_at=now,
+            has_gkg=False,
+        )
+    )
+    db_session.add(
+        ClusterComponentEvent(
+            component_id="component-1",
+            event_id="1001",
+            first_seen_at=now,
+            last_seen_at=now,
+            is_active=True,
+        )
+    )
+    await db_session.commit()
+
+    repo = ClusterComponentRepository(db_session)
+    later = datetime(2026, 3, 25, tzinfo=UTC)
+    await repo.mark_split("component-1", later)
+    await db_session.commit()
+
+    refreshed = await repo.get_by_component_id("component-1")
+    membership = (
+        (
+            await db_session.execute(
+                select(ClusterComponentEvent).where(
+                    ClusterComponentEvent.component_id == "component-1"
+                )
+            )
+        )
+        .scalars()
+        .one()
+    )
+
+    assert refreshed is not None
+    assert refreshed.status == "split"
+    assert refreshed.current_cluster_id is None
+    assert refreshed.current_table is None
+    assert refreshed.current_computed_at is None
+    assert membership.is_active is False
+    assert _as_utc(membership.last_seen_at) == later
 
 
 async def test_repository_replaces_active_event_membership(db_session) -> None:
@@ -257,3 +376,174 @@ async def test_repository_mark_active_updates_component_sources(db_session) -> N
         "https://example.com/original",
         "https://example.com/new",
     ]
+
+
+async def test_repository_list_active_event_membership_excludes_terminal_components(
+    db_session,
+) -> None:
+    now = datetime(2026, 3, 24, tzinfo=UTC)
+    db_session.add_all(
+        [
+            ClusterComponent(
+                component_id="active-1",
+                status="active",
+                anchor_source_url="https://example.com/active",
+                component_source_urls=["https://example.com/active"],
+                anchor_locked_at=now,
+                first_seen_at=now,
+                last_seen_at=now,
+                has_gkg=False,
+            ),
+            ClusterComponent(
+                component_id="stale-1",
+                status="stale",
+                anchor_source_url="https://example.com/stale",
+                component_source_urls=["https://example.com/stale"],
+                anchor_locked_at=now,
+                first_seen_at=now,
+                last_seen_at=now,
+                has_gkg=False,
+            ),
+            ClusterComponent(
+                component_id="merged-1",
+                status="merged",
+                anchor_source_url="https://example.com/merged",
+                component_source_urls=["https://example.com/merged"],
+                anchor_locked_at=now,
+                first_seen_at=now,
+                last_seen_at=now,
+                has_gkg=False,
+            ),
+        ]
+    )
+    db_session.add_all(
+        [
+            ClusterComponentEvent(
+                component_id="active-1",
+                event_id="1001",
+                first_seen_at=now,
+                last_seen_at=now,
+                is_active=True,
+            ),
+            ClusterComponentEvent(
+                component_id="stale-1",
+                event_id="1002",
+                first_seen_at=now,
+                last_seen_at=now,
+                is_active=True,
+            ),
+            ClusterComponentEvent(
+                component_id="merged-1",
+                event_id="1003",
+                first_seen_at=now,
+                last_seen_at=now,
+                is_active=True,
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    repo = ClusterComponentRepository(db_session)
+    membership = await repo.list_active_event_membership()
+
+    assert membership == {"active-1": {"1001"}, "stale-1": {"1002"}}
+
+
+async def test_repository_deletes_terminal_components_before_cutoff(db_session) -> None:
+    now = datetime(2026, 3, 25, tzinfo=UTC)
+    old_terminal = datetime(2026, 3, 10, tzinfo=UTC)
+    recent_terminal = datetime(2026, 3, 23, tzinfo=UTC)
+    db_session.add_all(
+        [
+            ClusterComponent(
+                component_id="merged-old",
+                status="merged",
+                anchor_source_url="https://example.com/merged-old",
+                component_source_urls=["https://example.com/merged-old"],
+                anchor_locked_at=old_terminal,
+                first_seen_at=old_terminal,
+                last_seen_at=old_terminal,
+                has_gkg=False,
+            ),
+            ClusterComponent(
+                component_id="split-old",
+                status="split",
+                anchor_source_url="https://example.com/split-old",
+                component_source_urls=["https://example.com/split-old"],
+                anchor_locked_at=old_terminal,
+                first_seen_at=old_terminal,
+                last_seen_at=old_terminal,
+                has_gkg=False,
+            ),
+            ClusterComponent(
+                component_id="merged-recent",
+                status="merged",
+                anchor_source_url="https://example.com/merged-recent",
+                component_source_urls=["https://example.com/merged-recent"],
+                anchor_locked_at=recent_terminal,
+                first_seen_at=recent_terminal,
+                last_seen_at=recent_terminal,
+                has_gkg=False,
+            ),
+            ClusterComponent(
+                component_id="active-old",
+                status="active",
+                anchor_source_url="https://example.com/active-old",
+                component_source_urls=["https://example.com/active-old"],
+                anchor_locked_at=old_terminal,
+                first_seen_at=old_terminal,
+                last_seen_at=old_terminal,
+                has_gkg=False,
+            ),
+        ]
+    )
+    db_session.add_all(
+        [
+            ClusterComponentEvent(
+                component_id="merged-old",
+                event_id="1001",
+                first_seen_at=old_terminal,
+                last_seen_at=old_terminal,
+                is_active=False,
+            ),
+            ClusterComponentEvent(
+                component_id="split-old",
+                event_id="1002",
+                first_seen_at=old_terminal,
+                last_seen_at=old_terminal,
+                is_active=False,
+            ),
+            ClusterComponentEvent(
+                component_id="merged-recent",
+                event_id="1003",
+                first_seen_at=recent_terminal,
+                last_seen_at=recent_terminal,
+                is_active=False,
+            ),
+            ClusterComponentEvent(
+                component_id="active-old",
+                event_id="1004",
+                first_seen_at=old_terminal,
+                last_seen_at=old_terminal,
+                is_active=True,
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    repo = ClusterComponentRepository(db_session)
+    deleted = await repo.delete_terminal_components_before(now.replace(day=18))
+    await db_session.commit()
+
+    component_ids = {
+        row.component_id
+        for row in (await db_session.execute(select(ClusterComponent))).scalars().all()
+    }
+    memberships = (await db_session.execute(select(ClusterComponentEvent))).scalars().all()
+
+    assert deleted == {"components": 2, "memberships": 2}
+    assert component_ids == {"merged-recent", "active-old"}
+    assert {(row.component_id, row.event_id) for row in memberships} == {
+        ("merged-recent", "1003"),
+        ("active-old", "1004"),
+    }

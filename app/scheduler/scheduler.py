@@ -142,6 +142,16 @@ def add_sync_job(scheduler: AsyncIOScheduler) -> None:
     )
     logger.info("retention_job_registered", interval_hours=24)
 
+    scheduler.add_job(
+        partial(run_cluster_terminal_cleanup_job, session_factory),
+        "interval",
+        hours=24,
+        id="gdelt_cluster_terminal_cleanup",
+        max_instances=1,
+        replace_existing=True,
+    )
+    logger.info("cluster_terminal_cleanup_job_registered", interval_hours=24)
+
 
 async def trigger_sync_now() -> None:
     """
@@ -204,6 +214,16 @@ async def run_retention_job(
 
     async with session_factory() as session:
         return await run_retention_cleanup(session)
+
+
+async def run_cluster_terminal_cleanup_job(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> dict[str, Any]:
+    """Run the terminal cluster component cleanup job."""
+    from app.services.cluster_terminal_cleanup_service import run_cluster_terminal_cleanup
+
+    async with session_factory() as session:
+        return await run_cluster_terminal_cleanup(session)
 
 
 async def run_event_enrichment_job(

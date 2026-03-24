@@ -774,6 +774,13 @@ class ClusterService:
             ):
                 continue
             split_component_ids.add(component["component_id"])
+            await self._delete_previous_materialization_if_needed(
+                component,
+                {
+                    "cluster_id": None,
+                    "table_name": None,
+                },
+            )
             await self._cluster_component_repo.mark_split(
                 component["component_id"], split_observed_at
             )
@@ -852,6 +859,13 @@ class ClusterService:
             for match in matches:
                 if match["component_id"] == canonical["component_id"]:
                     continue
+                await self._delete_previous_materialization_if_needed(
+                    match,
+                    {
+                        "cluster_id": None,
+                        "table_name": None,
+                    },
+                )
                 await self._cluster_component_repo.mark_merged_into(
                     match["component_id"],
                     canonical["component_id"],

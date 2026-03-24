@@ -977,6 +977,9 @@ async def test_build_and_materialise_marks_non_canonical_match_as_merged_into(db
                 anchor_locked_at=now,
                 first_seen_at=datetime(2026, 3, 20, tzinfo=UTC),
                 last_seen_at=now,
+                current_cluster_id="older-cluster",
+                current_table="story_clusters",
+                current_computed_at=now,
                 has_gkg=False,
             ),
             ClusterComponent(
@@ -987,7 +990,20 @@ async def test_build_and_materialise_marks_non_canonical_match_as_merged_into(db
                 anchor_locked_at=now,
                 first_seen_at=datetime(2026, 3, 22, tzinfo=UTC),
                 last_seen_at=now,
+                current_cluster_id="newer-cluster",
+                current_table="story_clusters",
+                current_computed_at=now,
                 has_gkg=False,
+            ),
+            StoryCluster(
+                cluster_id="older-cluster",
+                source_url="https://older.example.com/story",
+                computed_at=now,
+            ),
+            StoryCluster(
+                cluster_id="newer-cluster",
+                source_url="https://newer.example.com/story",
+                computed_at=now,
             ),
             ClusterComponentEvent(
                 component_id="older-component",
@@ -1056,6 +1072,10 @@ async def test_build_and_materialise_marks_non_canonical_match_as_merged_into(db
     assert components["older-component"].status == "active"
     assert components["newer-component"].status == "merged"
     assert components["newer-component"].merged_into_component_id == "older-component"
+    story_cluster_ids = {
+        row.cluster_id for row in (await db_session.execute(select(StoryCluster))).scalars().all()
+    }
+    assert "newer-cluster" not in story_cluster_ids
 
 
 async def test_build_and_materialise_keeps_original_anchor_on_matched_component(db_session) -> None:
@@ -1131,7 +1151,17 @@ async def test_build_and_materialise_marks_component_split_when_history_branches
             anchor_locked_at=now,
             first_seen_at=datetime(2026, 3, 20, tzinfo=UTC),
             last_seen_at=now,
+            current_cluster_id="split-cluster",
+            current_table="story_clusters",
+            current_computed_at=now,
             has_gkg=False,
+        )
+    )
+    db_session.add(
+        StoryCluster(
+            cluster_id="split-cluster",
+            source_url="https://anchor.example.com/original-story",
+            computed_at=now,
         )
     )
     for event_id in [5101, 5102, 5103, 5104, 5105, 5106]:
@@ -1197,6 +1227,10 @@ async def test_build_and_materialise_marks_component_split_when_history_branches
         for component in (await db_session.execute(select(ClusterComponent))).scalars().all()
     }
     assert components["component-1"].status == "split"
+    story_cluster_ids = {
+        row.cluster_id for row in (await db_session.execute(select(StoryCluster))).scalars().all()
+    }
+    assert "split-cluster" not in story_cluster_ids
 
 
 async def test_build_and_materialise_marks_component_stale_after_missed_runs(

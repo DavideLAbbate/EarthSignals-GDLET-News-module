@@ -318,6 +318,11 @@ class ClusterComponent(Base):
     __table_args__ = (
         Index("ix_cluster_components_status", "status"),
         Index("ix_cluster_components_merged_into_component_id", "merged_into_component_id"),
+        Index(
+            "ix_cluster_components_current_table_cluster_id",
+            "current_table",
+            "current_cluster_id",
+        ),
     )
 
     component_id: Mapped[str] = mapped_column(String(36), primary_key=True)
