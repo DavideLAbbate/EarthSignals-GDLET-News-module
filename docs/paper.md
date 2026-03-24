@@ -206,7 +206,9 @@ L'architettura non promette perfezione ontologica. Promette un equilibrio tra ro
 
 ## Retention degli stati terminali
 
-Gli stati terminali come `merged` e `split` sono utili per auditabilita', debug e ricostruzione storica, ma non devono crescere senza limite. La policy prevista e' semplice: i componenti in stato terminale vanno archiviati o rimossi dopo una retention operativa definita in giorni dalla transizione. Questa retention e' documentata ora come scelta architetturale, anche se il relativo job di garbage collection non e' ancora implementato nel pipeline.
+Gli stati terminali come `merged` e `split` restano utili per auditabilita', debug e ricostruzione storica di breve periodo, ma non crescono senza limite. Quando un componente entra in uno stato terminale, il sistema disattiva subito le sue membership attive in `cluster_component_events` e rimuove l'eventuale materializzazione corrente da `story_clusters` o `root_clusters`, cosi' il componente non partecipa piu' alla riconciliazione operativa e non resta esposto come cluster attivo.
+
+La retention applicata e' di tipo delete-after-retention: un job schedulato dedicato elimina periodicamente i componenti in stato `merged` o `split` che hanno superato una finestra operativa configurabile dalla transizione, insieme alle relative righe storiche di membership. Il default e' 7 giorni, coerente con un contesto newsroom in cui il valore operativo residuo di una storia terminale decade rapidamente, ma il parametro puo' essere aumentato se serve piu' buffer per debug o audit operativo.
 
 ## Sintesi finale
 
