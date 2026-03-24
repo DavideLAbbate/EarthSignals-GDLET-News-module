@@ -14,16 +14,21 @@ Il risultato finale e' una vista materializzata della notizia, progettata per es
 
 ## Principio architetturale
 
-Il principio guida e' document-centric first, story-centric second.
+Il principio guida e' component-centric first, story-centric second.
 
-Il sistema non prova a costruire storie globali partendo subito da relazioni astratte tra eventi. Parte invece dal segnale piu' concreto e stabile disponibile localmente: `source_url`. Tutti gli eventi che condividono lo stesso URL vengono prima interpretati come facce diverse dello stesso documento. Solo dopo questa fase il sistema valuta se due cluster documentali appartengono in realta' alla stessa storia piu' ampia.
+Il sistema non assume piu' che `source_url` definisca da solo un candidato di clustering. Parte invece da un grafo bipartito locale costruito su due tipi di nodo:
 
-Questo approccio divide il problema in due passaggi architetturalmente diversi:
+- gli `event_ids` della finestra temporale corrente;
+- i `mention_identifiers` che collegano quegli eventi ai documenti che li citano o li rilanciano.
 
-1. creare cluster documentali coerenti e arricchiti;
-2. fondere tra loro solo i cluster che mostrano evidenza forte di essere la stessa storia.
+L'idea architetturale e' che la prima unita' affidabile non sia il singolo URL sorgente, ma il componente connesso evento-mention che emerge dal layer di propagazione mediatica. Solo dopo aver costruito questi componenti il sistema decide quali meritano di diventare cluster materiali e quali, eventualmente, vadano fusi in storie ancora piu' ampie.
 
-La conseguenza e' importante: il sistema privilegia una costruzione incrementale, spiegabile e idempotente, invece di un clustering opaco eseguito in un solo passo.
+Questo approccio divide il problema in due passaggi diversi:
+
+1. costruire candidati come componenti connessi evento-mention;
+2. fondere tra loro solo i cluster che mostrano evidenza forte di appartenere alla stessa storia.
+
+La conseguenza e' importante: il pipeline resta incrementale, spiegabile e idempotente, ma smette di dipendere dall'assunzione ormai deprecata "stesso `source_url` = stesso candidato".
 
 ## Entry points del flusso
 
@@ -47,47 +52,60 @@ Ogni tabella esprime un tipo di verita' diverso.
 
 `gdelt_events` dice cosa e' successo secondo la codifica GDELT. `gdelt_mentions` dice quanto e dove la notizia si e' propagata. `gdelt_gkg` dice di cosa parla semanticamente il documento. L'architettura del clustering funziona proprio perche' questi layer restano separati fino al momento della composizione finale. Non vengono fusi a monte; vengono orchestrati a valle.
 
-## Fase 1: selezione dei candidati
+## Fase 1: costruzione dei candidati come componenti
 
-Il primo problema da risolvere e' evitare che ogni URL diventi un cluster. Il sistema applica quindi una fase di selezione che ha il ruolo di filtro architetturale, non solo di ottimizzazione.
+Il primo problema da risolvere e' evitare che ogni evento isolato o ogni URL rumoroso diventi un cluster. Il sistema applica quindi una fase di costruzione e filtro del grafo che ha un ruolo architetturale, non solo di ottimizzazione.
 
-Su tutti gli eventi nella finestra temporale richiesta, il servizio raggruppa per `source_url` e calcola aggregati base: numero di eventi distinti, volume di articoli, menzioni e fonti. Da questi valori deriva un `topic_score`, cioe' un indice sintetico di rilevanza.
+Su tutti gli eventi nella finestra temporale richiesta, il servizio:
 
-Ma il punteggio da solo non basta. Prima ancora del calcolo finale intervengono tre gate di sanita' del candidato:
+1. carica gli eventi dotati di `source_url`;
+2. carica le relative mentions;
+3. filtra i nodi mention prima della costruzione del grafo;
+4. costruisce i componenti connessi tra eventi e `mention_identifiers`.
 
-- esclusione dei domini noti come aggregatori o content farm;
-- esclusione degli URL che assomigliano a pagine sezione, tag, archive o category;
-- esclusione dei candidati privi di segnale minimo nel layer mention, se la configurazione lo richiede.
+I filtri vengono applicati a livello di nodo mention, non come post-processing sui cluster gia' formati. Oggi includono:
 
-Architetturalmente, questa fase serve a impedire che il sistema costruisca cluster su pagine strutturalmente sbagliate. In altre parole, il pipeline non si limita a prendere i dati piu' forti: prova a scartare i contenitori che non rappresentano una notizia singola.
+- esclusione dei domini in `cluster_source_domain_blocklist`;
+- esclusione degli URL che somigliano a pagine sezione, category, search o archive;
+- rimozione implicita dei candidati singleton, cioe' componenti che non mostrano connettivita' reale tra piu' eventi.
+
+Una volta costruito il componente, il sistema misura esplicitamente alcune proprieta' strutturali:
+
+- numero di eventi;
+- numero di `source_url` distinti;
+- numero di domini distinti;
+- densita' del componente nel grafo evento-mention;
+- ampiezza temporale degli eventi.
+
+Questi segnali sostituiscono il vecchio candidate scoring per `source_url`. L'ammissione del candidato non dipende piu' dal `topic_score` storico, ma da gate strutturali configurabili come `cluster_candidate_min_event_ids`, `cluster_candidate_min_source_urls`, `cluster_candidate_min_domains`, `cluster_candidate_min_density` e `cluster_candidate_max_event_span_hours`.
+
+Architetturalmente, questa fase serve a impedire che il sistema costruisca cluster su strutture troppo deboli, troppo isolate o troppo rumorose. Il pipeline non chiede piu' "questo URL e' abbastanza forte?"; chiede invece "questo componente rappresenta davvero una storia condivisa da piu' eventi e piu' fonti?".
 
 ## Fase 2: raccolta batch dei layer
 
-Una volta ottenuti i candidati, il sistema non esegue arricchimenti isolati uno per uno. Esegue invece raccolte batch per ridurre round-trip e mantenere il flusso sotto controllo.
+Una volta ottenuti i componenti ammessi, il sistema non esegue arricchimenti isolati uno per uno. Esegue raccolte batch per ridurre round-trip e mantenere il flusso sotto controllo.
 
 L'ordine logico e' questo:
 
-1. raccoglie tutti gli eventi per gli URL candidati;
-2. raccoglie tutte le mentions per gli event id emersi;
-3. raccoglie i record GKG associati ai documenti rilevanti.
+1. raccoglie gli eventi della finestra;
+2. raccoglie tutte le mentions collegate a quegli eventi;
+3. raccoglie i record GKG associati ai `source_url` rappresentati nei componenti ammessi.
 
-Il punto architetturalmente piu' delicato e' il terzo. Il sistema moderno usa solo il GKG del `source_url` del cluster come sorgente semantica primaria del documento. Non usa indiscriminatamente il GKG di tutti i documenti che hanno menzionato quella storia, perche' questo contaminerebbe il cluster con entita' e temi di articoli secondari o completamente laterali.
+Il punto architetturalmente piu' delicato e' il terzo. Il sistema non usa il GKG di documenti esterni al componente; usa solo i GKG dei `source_url` che appartengono al candidato stesso. Questo allarga la base semantica rispetto al vecchio modello single-URL, ma resta confinato al perimetro del componente. In questo modo il cluster puo' ereditare temi, persone, organizzazioni, luoghi e tono da piu' URL editorialmente coinvolti nella stessa storia, senza contaminarsi con documenti esterni che hanno solo citato incidentalmente l'evento.
 
-Questa e' una scelta di purezza semantica: il cluster eredita la semantica del documento sorgente, mentre il layer mention resta un segnale di propagazione, non una fonte da cui assorbire contenuto editoriale indiscriminato.
+## Fase 3: costruzione del cluster componente
 
-## Fase 3: costruzione del cluster documentale
+Per ogni candidato ammesso, il sistema costruisce una rappresentazione completa della storia locale emersa dal componente.
 
-Per ogni candidato, il sistema costruisce una rappresentazione completa della notizia documentale.
-
-Il `cluster_id` e' deterministico ed e' derivato soltanto da `source_url`. Questa decisione e' centrale. Significa che la stessa storia documentale, se ricalcolata domani o in un rerun, punta allo stesso identificatore e quindi alla stessa riga logica. Non nascono cluster gemelli solo perche' cambia il giorno di esecuzione.
+Il `cluster_id` e' deterministico ed e' derivato dall'hash dell'intero insieme ordinato degli `event_ids` del componente. Questa decisione e' centrale. Significa che l'identita' del cluster non dipende dall'URL rappresentativo scelto in quella run, ma dalla struttura fattuale del componente. Se in un rerun cambia il `source_url` piu' rappresentativo, il cluster continua comunque a puntare allo stesso identificatore logico finche' il set di eventi resta lo stesso.
 
 Dentro questo cluster confluiscono tre famiglie di attributi.
 
-La prima famiglia e' quantitativa: `event_count`, `num_articles`, `num_mentions`, `num_sources`, `topic_score`. Serve a misurare il peso della storia.
+La prima famiglia e' quantitativa: `event_count`, `num_articles`, `num_mentions`, `num_sources`, `topic_score`. Serve a misurare il peso della storia. In particolare, il `topic_score` del cluster non e' piu' il vecchio score documentale basato su un solo URL, ma un punteggio ricalcolato dai breadth signals del componente: numero di eventi, numero di URL distinti e numero di domini distinti.
 
 La seconda famiglia e' interpretativa sul layer evento: tipi di evento dominanti, classi quad dominanti, severita' media, paesi e location dominanti, insieme degli `event_ids`, e range delle date evento. Serve a dire quale forma geopolitica assume la storia.
 
-La terza famiglia e' narrativa: fonti di mention, finestra temporale delle mention, temi, persone, organizzazioni, luoghi GKG e tono documentale medio. Serve a rendere il cluster leggibile come oggetto quasi editoriale, non solo analitico.
+La terza famiglia e' narrativa: fonti di mention, finestra temporale delle mention, temi, persone, organizzazioni, luoghi GKG e tono documentale medio. Serve a rendere il cluster leggibile come oggetto quasi editoriale, non solo analitico. Anche `mention_count` viene trattato in modo conservativo: rappresenta il numero di `mention_identifiers` distinti del componente, non la somma grezza delle righe mention, per evitare doppio conteggio quando lo stesso URL e' condiviso da piu' eventi.
 
 A questo punto il sistema non ha ancora creato una storia globale. Ha creato una buona unita' documentale consistente.
 
@@ -109,7 +127,7 @@ Su questi criteri agiscono due gate di sicurezza:
 
 Architetturalmente, questi gate impediscono che due cluster vengano fusi solo perche' condividono segnali deboli o generici. Un tema comune molto frequente o un singolo overlap rumoroso non bastano da soli se il profilo temporale o il tipo di azione raccontata divergono troppo.
 
-Quando piu' cluster vengono fusi, il sistema sceglie come anchor quello con `topic_score` piu' alto. L'anchor fornisce identita' e URL rappresentativo; gli altri cluster contribuiscono invece alle aggregazioni strutturali. Il cluster finale diventa quindi una sintesi orientata dal candidato piu' forte, ma nutrita dall'intero componente.
+Quando piu' cluster vengono fusi, il sistema sceglie ancora un anchor con `topic_score` piu' alto come URL rappresentativo, ma non ne eredita piu' l'identita' logica. L'identita' finale del cluster fuso viene ricalcolata in modo deterministico dall'insieme ordinato degli `event_ids` risultanti. L'anchor orienta la rappresentazione esterna; la struttura completa del componente fuso determina invece l'identita' persistente.
 
 ## Fase 5: partizione finale tra story e root
 
@@ -151,8 +169,10 @@ Tra le piu' importanti:
 - la finestra temporale usata dal job schedulato;
 - il blocklist dei domini da escludere;
 - i segmenti URL che definiscono pagine sezione;
-- l'obbligo o meno di avere menzioni per essere candidati;
+- le soglie minime di `event_ids`, `source_url` e domini per ammettere un componente;
+- la densita' minima del componente e il massimo span temporale ammesso;
 - il massimo gap temporale ammesso nel merge;
+- i parametri del merge per overlap mention, soglia Jaccard, cap dei temi e document frequency massima dei temi;
 - la soglia che separa story cluster e root cluster.
 
 Questo rende il sistema adattabile senza riscrivere il modello logico. In termini architetturali, il codice implementa il pipeline; la configurazione ne modula il comportamento operativo.
@@ -161,7 +181,7 @@ Questo rende il sistema adattabile senza riscrivere il modello logico. In termin
 
 Il sistema assume che i dati siano rumorosi, incompleti e a volte semanticamente fuorvianti. Per questo incorpora difese distribuite nel flusso.
 
-Scarta URL structuralmente sbagliati gia' in ingresso. Separa il layer semantico del documento sorgente dal rumore dei documenti che lo citano. Limita i merge con gate temporali e tipologici. Usa upsert per evitare duplicazioni su rerun. Riconcilia i category flip per mantenere mutua esclusione tra story e root.
+Scarta nodi mention structuralmente sbagliati gia' in ingresso. Costruisce candidati solo quando esiste connettivita' reale tra eventi e propagazione mediatica. Limita i merge con gate temporali e tipologici. Usa upsert per evitare duplicazioni su rerun. Riconcilia i category flip per mantenere mutua esclusione tra story e root.
 
 Non elimina ogni possibile errore semantico, ma riduce i due rischi principali del clustering giornalistico:
 
@@ -172,13 +192,13 @@ L'architettura non promette perfezione ontologica. Promette un equilibrio tra ro
 
 ## Sintesi finale
 
-La creazione dei cluster in questo backend e' un pipeline di materializzazione a piu' layer. Parte da eventi locali gia' ingeriti, filtra candidati documentali, costruisce cluster coerenti attorno a `source_url`, fonde i casi che mostrano evidenza di appartenere alla stessa storia, poi separa l'output finale in cluster normali e mega-cluster.
+La creazione dei cluster in questo backend e' un pipeline di materializzazione a piu' layer. Parte da eventi locali gia' ingeriti, costruisce candidati come componenti connessi evento-mention, ammette solo quelli che superano gate strutturali espliciti, li arricchisce con i layer evento/mention/GKG, fonde i casi che mostrano evidenza di appartenere alla stessa storia, poi separa l'output finale in cluster normali e mega-cluster.
 
 La forza architetturale del sistema sta nel fatto che ogni passaggio ha una responsabilita' netta:
 
-- il candidate scoring decide cosa merita attenzione;
+- la costruzione del grafo decide quali componenti meritano attenzione;
 - la raccolta batch compone i tre layer informativi;
-- il cluster build crea l'unita' documentale;
+- il cluster build crea l'unita' locale del componente;
 - il merger crea l'unita' narrativa piu' ampia;
 - la partizione story/root organizza l'output per consumo applicativo;
 - l'API espone solo viste gia' consolidate.
