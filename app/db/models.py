@@ -254,3 +254,58 @@ class StoryCluster(Base):
     )
 
     __table_args__ = (Index("ix_story_clusters_topic_score", "topic_score"),)
+
+
+class RootCluster(Base):
+    """Materialised root cluster for very large merged stories.
+
+    Mirrors StoryCluster so the service and API can reuse the same payload shape,
+    while keeping large clusters isolated in a dedicated table.
+    """
+
+    __tablename__ = "root_clusters"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    cluster_id: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    source_url: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # ── Scoring ────────────────────────────────────────────────────────────
+    event_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    num_articles: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    num_mentions: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    num_sources: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    topic_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # ── Event layer enrichment ─────────────────────────────────────────────
+    event_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    dominant_event_types: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    dominant_quad_classes: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    avg_severity_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    dominant_countries: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    dominant_locations: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
+    # ── Mentions layer enrichment ──────────────────────────────────────────
+    mention_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    distinct_mention_sources: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    mention_identifiers: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    first_mention_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_mention_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # ── GKG layer enrichment ───────────────────────────────────────────────
+    themes: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    persons: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    organizations: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    gkg_locations: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    document_tone_avg: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # ── Event date range ───────────────────────────────────────────────────
+    event_date_ref_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    event_date_ref_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+
+    __table_args__ = (Index("ix_root_clusters_topic_score", "topic_score"),)

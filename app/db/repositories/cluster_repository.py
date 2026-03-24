@@ -179,3 +179,13 @@ class ClusterRepository:
             delete(StoryCluster).where(StoryCluster.computed_at < cutoff_ts)
         )
         return result.rowcount or 0
+
+    async def delete_by_cluster_ids(self, cluster_ids: set[str]) -> int:
+        """Delete clusters whose cluster_id is in cluster_ids. Returns deleted count."""
+        if not cluster_ids:
+            return 0
+
+        result = await self._session.execute(
+            delete(StoryCluster).where(StoryCluster.cluster_id.in_(cluster_ids))
+        )
+        return result.rowcount or 0

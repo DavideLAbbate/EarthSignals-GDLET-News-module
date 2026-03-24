@@ -7,6 +7,7 @@ Incremental uses lastupdate.txt to pull the latest 15-minute file.
 
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -77,22 +78,54 @@ async def run_bootstrap_range(
         requested_files = [
             (url, file_ts) for url, file_ts in file_list if since_ts <= file_ts <= until_ts
         ]
+        mentions_index = _index_urls_by_timestamp(
+            await gdelt.fetch_master_mentions_urls(since_ts=since_ts, until_ts=until_ts)
+        )
+        gkg_index = _index_urls_by_timestamp(
+            await gdelt.fetch_master_gkg_urls(since_ts=since_ts, until_ts=until_ts)
+        )
+        total_files = len(requested_files)
 
-        for url, file_ts in requested_files:
+        for index, (url, file_ts) in enumerate(requested_files, start=1):
             rows = await gdelt.download_events(url)
             if not rows:
+                logger.info(
+                    "bootstrap_batch_skipped_empty",
+                    file_ts=file_ts,
+                    progress=index,
+                    total_files=total_files,
+                    url=url,
+                )
                 continue
 
             events = [_row_to_event_dict(row) for row in rows]
             inserted = await event_repository.bulk_insert_events(session, events)
             await session.commit()
 
-            await _ingest_mentions_batch(gdelt, mentions_repo, session, file_ts)
-            await _ingest_gkg_batch(gdelt, gkg_repo, session, file_ts)
+            mentions_inserted = await _ingest_mentions_batch(
+                gdelt,
+                mentions_repo,
+                session,
+                file_ts,
+                mentions_urls=mentions_index.get(file_ts, []),
+            )
+            gkg_inserted = await _ingest_gkg_batch(
+                gdelt,
+                gkg_repo,
+                session,
+                file_ts,
+                gkg_urls=gkg_index.get(file_ts, []),
+            )
 
             total_ingested += inserted
             logger.info(
                 "bootstrap_batch_ingested",
+                event_rows=len(events),
+                file_ts=file_ts,
+                gkg_inserted=gkg_inserted,
+                mentions_inserted=mentions_inserted,
+                progress=index,
+                total_files=total_files,
                 url=url,
                 batch_size=len(events),
                 inserted=inserted,
@@ -298,24 +331,43 @@ def _row_to_gkg_dict(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _index_urls_by_timestamp(file_list: list[tuple[str, int]]) -> dict[int, list[str]]:
+    """Group GDELT file URLs by timestamp for O(1) per-batch sidecar lookup."""
+    indexed_urls: dict[int, list[str]] = defaultdict(list)
+    for url, file_ts in file_list:
+        indexed_urls[file_ts].append(url)
+    return dict(indexed_urls)
+
+
 async def _ingest_mentions_batch(
     gdelt: GdeltHttpClient,
     mentions_repo: MentionsRepository,
     session: AsyncSession,
     file_ts: int,
-) -> None:
+    *,
+    mentions_urls: list[str] | None = None,
+) -> int:
     """Best-effort ingest of the batch-aligned EVENTMENTIONS file during bootstrap."""
+    inserted_total = 0
     try:
-        mentions_files = await gdelt.fetch_master_mentions_urls(since_ts=file_ts, until_ts=file_ts)
-        for mentions_url, _ in mentions_files:
+        if mentions_urls is None:
+            mentions_urls = [
+                mentions_url
+                for mentions_url, _ in await gdelt.fetch_master_mentions_urls(
+                    since_ts=file_ts,
+                    until_ts=file_ts,
+                )
+            ]
+        for mentions_url in mentions_urls:
             mentions_rows = await gdelt.download_mentions(mentions_url)
             mapped = [_row_to_mention_dict(row) for row in mentions_rows if row]
             if mapped:
-                await mentions_repo.bulk_upsert(mapped)
+                inserted_total += await mentions_repo.bulk_upsert(mapped)
                 await session.commit()
     except Exception as exc:
         await session.rollback()
         logger.error("mentions_ingestion_error", error=str(exc), file_ts=file_ts)
+    return inserted_total
 
 
 async def _ingest_gkg_batch(
@@ -323,16 +375,27 @@ async def _ingest_gkg_batch(
     gkg_repo: GkgRepository,
     session: AsyncSession,
     file_ts: int,
-) -> None:
+    *,
+    gkg_urls: list[str] | None = None,
+) -> int:
     """Best-effort ingest of the batch-aligned GKG file during bootstrap."""
+    inserted_total = 0
     try:
-        gkg_files = await gdelt.fetch_master_gkg_urls(since_ts=file_ts, until_ts=file_ts)
-        for gkg_url, _ in gkg_files:
+        if gkg_urls is None:
+            gkg_urls = [
+                gkg_url
+                for gkg_url, _ in await gdelt.fetch_master_gkg_urls(
+                    since_ts=file_ts,
+                    until_ts=file_ts,
+                )
+            ]
+        for gkg_url in gkg_urls:
             gkg_rows = await gdelt.download_gkg(gkg_url)
             mapped = [_row_to_gkg_dict(row) for row in gkg_rows if row]
             if mapped:
-                await gkg_repo.bulk_upsert(mapped)
+                inserted_total += await gkg_repo.bulk_upsert(mapped)
                 await session.commit()
     except Exception as exc:
         await session.rollback()
         logger.error("gkg_ingestion_error", error=str(exc), file_ts=file_ts)
+    return inserted_total

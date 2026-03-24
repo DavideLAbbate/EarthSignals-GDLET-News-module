@@ -1,6 +1,10 @@
+"""Manual CLI entrypoint for cluster materialisation."""
+
+from __future__ import annotations
+
+import asyncio
 import os
 import sys
-import asyncio
 
 # Load .env and ensure asyncpg driver before any app.* imports
 try:
@@ -28,7 +32,7 @@ from app.db.session import _get_session_factory  # noqa: E402
 from app.services.cluster_service import ClusterService  # noqa: E402
 
 
-async def main():
+async def main() -> None:
     since = int(sys.argv[1]) if len(sys.argv) > 1 else 20260308
     until = int(sys.argv[2]) if len(sys.argv) > 2 else None
     factory = _get_session_factory()
@@ -38,4 +42,5 @@ async def main():
         print(f"Materialised {count} clusters")
 
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())

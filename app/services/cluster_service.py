@@ -19,6 +19,7 @@ from app.db.models import GdeltEvent, GdeltGkg, GdeltMention
 from app.db.repositories.cluster_repository import ClusterRepository
 from app.db.repositories.gkg_repository import GkgRepository
 from app.db.repositories.mentions_repository import MentionsRepository
+from app.db.repositories.root_cluster_repository import RootClusterRepository
 from app.integrations.event_enrichment_mapper import (
     compute_severity_score,
     compute_topic_score,
@@ -42,6 +43,7 @@ class ClusterService:
         self._mentions_repo = MentionsRepository(session)
         self._gkg_repo = GkgRepository(session)
         self._cluster_repo = ClusterRepository(session)
+        self._root_cluster_repo = RootClusterRepository(session)
 
     async def _score_source_urls(
         self,
@@ -407,7 +409,45 @@ class ClusterService:
             if not cluster_rows:
                 return 0
 
-            inserted = await self._cluster_repo.bulk_upsert(cluster_rows)
+            settings = get_settings()
+            root_cluster_rows = [
+                cluster
+                for cluster in cluster_rows
+                if cluster["event_count"] > settings.root_cluster_min_event_count
+            ]
+            story_cluster_rows = [
+                cluster
+                for cluster in cluster_rows
+                if cluster["event_count"] <= settings.root_cluster_min_event_count
+            ]
+            logger.info(
+                "cluster_phase_partition",
+                root_clusters=len(root_cluster_rows),
+                story_clusters=len(story_cluster_rows),
+                threshold=settings.root_cluster_min_event_count,
+            )
+
+            inserted = 0
+            if story_cluster_rows:
+                inserted += await self._cluster_repo.bulk_upsert(story_cluster_rows)
+                logger.info("story_clusters_materialised", count=len(story_cluster_rows))
+
+            if root_cluster_rows:
+                inserted += await self._root_cluster_repo.bulk_upsert(root_cluster_rows)
+                logger.info("root_clusters_materialised", count=len(root_cluster_rows))
+
+            deleted_from_root = await self._root_cluster_repo.delete_by_cluster_ids(
+                {cluster["cluster_id"] for cluster in story_cluster_rows}
+            )
+            deleted_from_story = await self._cluster_repo.delete_by_cluster_ids(
+                {cluster["cluster_id"] for cluster in root_cluster_rows}
+            )
+            logger.info(
+                "cluster_phase_reconcile",
+                deleted_from_root=deleted_from_root,
+                deleted_from_story=deleted_from_story,
+            )
+
             t_upsert = time.monotonic()
             logger.info(
                 "clusters_materialised",

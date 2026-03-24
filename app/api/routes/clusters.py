@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import verify_api_key
 from app.db.repositories.cluster_repository import ClusterRepository
+from app.db.repositories.root_cluster_repository import RootClusterRepository
 from app.db.session import get_async_session
 from app.schemas.clusters import (
     ClusterEventEnrichment,
@@ -53,6 +54,8 @@ def _map_cluster(cluster) -> StoryClusterResponse:
             locations=cluster.gkg_locations or [],
             document_tone_avg=cluster.document_tone_avg,
         ),
+        event_date_ref_start=cluster.event_date_ref_start,
+        event_date_ref_end=cluster.event_date_ref_end,
         computed_at=cluster.computed_at,
     )
 
@@ -73,6 +76,36 @@ async def search_clusters(
 ) -> ClusterSearchResponse:
     """Search clusters with optional score and country filters."""
     repo = ClusterRepository(session)
+    clusters, total = await repo.search(
+        min_score=min_score,
+        country_code=country_code,
+        limit=limit,
+        offset=offset,
+    )
+    return ClusterSearchResponse(
+        clusters=[_map_cluster(cluster) for cluster in clusters],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get(
+    "/root-clusters/search",
+    response_model=ClusterSearchResponse,
+    summary="Search materialised root clusters",
+    tags=["Clusters"],
+)
+async def search_root_clusters(
+    min_score: float | None = Query(default=None, ge=0.0),
+    country_code: str | None = Query(default=None, max_length=2),
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    session: AsyncSession = Depends(get_async_session),
+    _: str = Depends(verify_api_key),
+) -> ClusterSearchResponse:
+    """Search root clusters with optional score and country filters."""
+    repo = RootClusterRepository(session)
     clusters, total = await repo.search(
         min_score=min_score,
         country_code=country_code,

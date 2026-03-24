@@ -4,183 +4,180 @@ Repository-specific guidance for agentic coding tools working in
 `web-journal-news-module` (`gdelt-news-backend`).
 
 This is a Python 3.11+ FastAPI backend that:
-- ingests GDELT 2.0 events from public HTTP export files (no BigQuery at runtime)
-- uses Anthropic (Claude) to normalize free-text search filters
-- caches normalized filters in PostgreSQL
-- exposes authenticated REST endpoints for searching locally cached events
-- runs background APScheduler jobs for ingestion, metadata refresh, enrichment, and retention
+- ingests GDELT 2.0 public HTTP export files into PostgreSQL
+- normalizes free-text search filters with Anthropic
+- serves authenticated REST endpoints from the local event store
+- runs APScheduler jobs for metadata sync, ingestion, enrichment, and clustering
 
 ## Rule Files
+
 - No `.cursorrules` file found.
 - No `.cursor/rules/` directory found.
 - No `.github/copilot-instructions.md` file found.
-- Follow this file and nearby code patterns first.
+- Follow this file, nearby modules, and nearby tests first.
 
 ## Project Layout
 
-```
-app/api/          — routes, dependencies, auth checks, error handlers
-app/services/     — orchestration and business logic
-app/integrations/ — external clients (BigQuery, Anthropic, GDELT HTTP), query builders, mappers
-app/db/           — ORM models, async session, repositories
-app/core/         — settings, structlog config, typed domain exceptions
-app/scheduler/    — APScheduler wiring, sync job, ingestion jobs
-app/schemas/      — Pydantic v2 request/response models
-tests/            — pytest suite; all external services are mocked
-alembic/versions/ — database migrations
-```
-
-Key runtime data flow:
-```
-GDELT export ZIPs (HTTP) → ingestion_service → gdelt_events (Postgres)
-gdelt_events → sync_job → sync_state (metadata snapshot)
-POST /events/search → filter_service (Claude) → postgres_compiler → gdelt_events
+```text
+app/api/          routes, dependencies, auth, error handlers
+app/core/         settings, logging, domain exceptions
+app/db/           SQLAlchemy models, sessions, repositories
+app/integrations/ Anthropic, GDELT HTTP, article/enrichment clients
+app/scheduler/    APScheduler wiring and startup jobs
+app/schemas/      Pydantic v2 request/response models
+app/services/     orchestration and business logic
+alembic/versions/ schema migrations
+tests/            pytest suite with mocked external services
 ```
 
-## Install, Build, And Run
+Key runtime flow:
+
+```text
+GDELT HTTP exports -> ingestion_service -> gdelt_events / mentions / gkg tables
+POST /events/search -> filter_service -> repositories -> PostgreSQL
+startup + APScheduler -> sync, incremental ingestion, enrichment, clustering
+```
+
+## Install, Run, And Migrations
 
 ```bash
 pip install -e ".[dev]"
 uvicorn app.main:create_app --factory --reload --port 8000
-docker-compose up --build
+docker compose up --build
 alembic upgrade head
 alembic revision --autogenerate -m "description"
 ```
 
-- `pyproject.toml` uses `hatchling` as the build backend.
-- There is no frontend build pipeline.
-- For verification prefer lint + targeted tests over packaging.
+- `pyproject.toml` uses `hatchling`; there is no separate build step beyond install.
+- Prefer local verification with Ruff + pytest over packaging work.
+- `docker-compose.local.yml` starts only Postgres for local non-container app development.
 
 ## Lint And Format
 
 ```bash
-ruff check .          # check for lint errors
-ruff check --fix .    # auto-fix lint errors
-ruff format .         # format all files
-ruff format --check . # check formatting without writing
+ruff check .
+ruff check --fix .
+ruff format .
+ruff format --check .
 ```
 
-- Ruff is the only configured formatter/linter; do not add a second one.
-- Config lives in `pyproject.toml`: line length `100`, target `py311`.
-- Always run `ruff check .` before considering any change complete.
+- Ruff is the only configured linter/formatter; do not add another one.
+- Repository style is whatever Ruff enforces plus local conventions in nearby files.
+- Before finishing code changes, run at least `ruff check .`.
 
 ## Test Commands
 
 ```bash
-pytest                                                    # full suite
-pytest -v                                                 # verbose
-pytest tests/test_api_events.py                           # single file
-pytest tests/test_api_events.py::test_search_events_success -v  # single test
-pytest -k "filter" -v                                     # keyword match
-pytest -s -v                                              # show stdout
-pytest --tb=short                                         # shorter tracebacks
+pytest
+pytest -v
+pytest --tb=short
+pytest -s -v
+pytest tests/test_api_events.py
+pytest tests/test_api_events.py::test_search_events_success -v
+pytest tests/test_run_bootstrap_range.py -v
+pytest -k "bootstrap" -v
 ```
 
 Single-test guidance:
-- Prefer `pytest path/to/file.py::test_name -v` for the tightest feedback loop.
-- When touching validation or error mapping, run the focused test **and** the related
-  route test (`test_api_events.py`).
-- External services (BigQuery, Anthropic, GDELT HTTP) must be mocked in all tests.
+
+- Prefer `pytest path/to/file.py::test_name -v` for the fastest loop.
+- When touching validation, run both the focused schema/unit test and the relevant API route test.
+- When touching startup, scheduler, or ingestion behavior, run the nearest targeted test first.
+- External integrations must stay mocked in tests; never require live Anthropic or GDELT access.
 
 ## Testing Conventions
 
-- `asyncio_mode = "auto"` is set in `pyproject.toml`; no `@pytest.mark.asyncio` needed.
-- `tests/conftest.py` sets required env vars **before** any `app.*` import occurs.
-  Do not import app modules at module level in test files unless env vars are already set.
-- Test database: in-memory SQLite via `sqlite+aiosqlite:///:memory:`.
-- Standard fixtures (prefer reuse over duplication):
-  - `async_client` — `httpx.AsyncClient` wired to the test app
-  - `api_headers` — `{"X-API-Key": "test-api-key"}`
-  - `db_session` — async SQLAlchemy session backed by in-memory SQLite
-  - `mock_bq_client` — `MagicMock` with `run_query = AsyncMock(return_value=[])`
-  - `mock_anthropic_client` — `AsyncMock`
-- `clear_settings_cache` is an `autouse` fixture; `get_settings()` cache is cleared
-  before and after every test automatically.
+- `pytest` is configured with `asyncio_mode = "auto"`; no `@pytest.mark.asyncio` needed.
+- `tests/conftest.py` seeds env vars before importing app modules; preserve that order.
+- Tests use in-memory SQLite via `sqlite+aiosqlite:///:memory:`.
+- Reuse shared fixtures instead of duplicating setup:
+  - `async_client`
+  - `api_headers`
+  - `db_session`
+  - `mock_anthropic_client`
+- `get_settings()` is cached; tests rely on clearing that cache between cases.
 
-## Python Module Structure
+## Python File Structure
 
-- Start every non-trivial module with a module docstring (one-liner or short block).
+- Start every non-trivial module with a short module docstring.
 - Follow the docstring with `from __future__ import annotations`.
-- Import order (enforced by Ruff): future → stdlib → third-party → `app.*`.
-- Use absolute imports only. No relative imports, no wildcard imports.
+- Import order: future -> stdlib -> third-party -> `app.*`.
+- Use absolute imports only; no relative imports, no wildcard imports.
 
-## Formatting And Style
+## Formatting And General Style
 
-- Line length: 100 characters.
-- Match existing Ruff formatting exactly; do not reformat unrelated code.
-- Prefer small, local edits over broad rewrites.
-- Preserve existing section-divider comment style (e.g. `# ── Section ─────`).
-- Add inline comments only when the code is not self-explanatory.
+- Line length is 100 characters.
+- Keep edits small and local; do not reformat unrelated code.
+- Preserve existing section-divider comments such as `# ── Section ─────`.
+- Add comments only when the code is not obvious from names and structure.
+- Prefer guard clauses over deep nesting.
 - Keep route handlers thin; push orchestration into `app/services/`.
+- Keep repository code in `app/db/repositories/`; do not inline SQL in routes or services.
 
 ## Types And Naming
 
-- Annotate **all** function signatures (parameters and return type).
+- Annotate every function signature, including return types.
 - Prefer builtin generics: `list[str]`, `dict[str, Any]`, `tuple[int, str]`.
 - Prefer `str | None` over `Optional[str]`.
-- Use precise return types for helpers, repositories, services, and integration wrappers.
-- Reuse typed Pydantic schema models rather than passing raw `dict` across layer boundaries.
+- Use precise return types for helpers, services, repositories, and integrations.
+- Pass typed schema/domain objects instead of loose dicts when a model already exists.
 
-| Identifier kind | Convention |
+Naming conventions:
+
+| Kind | Convention |
 |---|---|
 | modules, functions, variables | `snake_case` |
 | classes | `PascalCase` |
-| constants (module-level) | `UPPER_SNAKE_CASE` |
+| constants | `UPPER_SNAKE_CASE` |
 | private helpers | `_leading_underscore` |
-| log event names | short `snake_case` string literal |
+| log event names | short `snake_case` literals |
 
 ## Pydantic And Settings
 
-- Codebase uses **Pydantic v2**.
-- Use `Field(...)` with constraints and descriptions for all API-facing schemas.
-- `model_validate(...)` not `.parse_obj()`. `model_dump(...)` not `.dict()`.
-- Cross-field validation: `@model_validator(mode="after")`.
-- Raw-value preprocessing: `@field_validator(..., mode="before")`.
-- Always obtain settings via `get_settings()` from `app/core/config.py`.
-  Never read env vars directly with `os.environ` inside app code.
+- Codebase uses Pydantic v2 and `pydantic-settings`.
+- Use `Field(...)` with constraints/descriptions for API-facing schemas.
+- Use `model_validate(...)` and `model_dump(...)`, not v1 APIs.
+- Use `@field_validator(..., mode="before")` for raw preprocessing.
+- Use `@model_validator(mode="after")` for cross-field validation.
+- In app code, read configuration only through `get_settings()` from `app/core/config.py`.
 
 ## FastAPI, Services, And Boundaries
 
-- Inject dependencies via `Depends(...)` and `app.state`; never construct clients inline.
-- HTTP concerns stay in `app/api/`; business logic stays in `app/services/`.
-- SQL stays in `app/db/repositories/`; never embed raw queries in routes or services.
-- External SDK calls stay in `app/integrations/`; never call SDKs directly from routes.
-- `app/main.py` owns app factory, lifespan startup/shutdown, and scheduler wiring.
-- Scheduler jobs are registered and wired in `app/scheduler/`; never schedule from routes.
+- Inject dependencies with `Depends(...)` and `app.state`; do not instantiate clients inline.
+- HTTP concerns stay in `app/api/`.
+- Business logic stays in `app/services/`.
+- External HTTP/SDK calls stay in `app/integrations/`.
+- `app/main.py` owns app factory, lifespan startup/shutdown, and startup task scheduling.
+- Scheduler registration belongs in `app/scheduler/`, not in route handlers.
 
 ## Error Handling
 
-- All domain exceptions inherit from `GDELTBackendError` (`app/core/exceptions.py`).
-- Add new exception classes in `app/core/exceptions.py`; map them in `app/api/error_handlers.py`.
-- Services and integrations raise domain exceptions (`IngestionError`, `LocalQueryError`, etc.).
-- Route handlers and dependency functions may raise `HTTPException` for request-layer errors.
-- Prefer guard clauses over deep nesting.
-- For non-fatal side effects, log the failure and continue (match existing patterns).
+- Domain exceptions inherit from `GDELTBackendError` in `app/core/exceptions.py`.
+- Add new exception classes there and map them in `app/api/error_handlers.py`.
+- Services/integrations should raise domain exceptions, not FastAPI `HTTPException`.
+- Routes/dependencies may raise `HTTPException` for request-layer failures only.
+- For non-fatal side effects, log the failure and continue when existing code follows that pattern.
 
 ## Logging
 
 - Use `structlog` via `app.core.logging.get_logger(__name__)`.
-- No `print()` for runtime diagnostics.
-- Use short, `snake_case` event strings as the first positional argument:
-  `logger.info("event_ingested", url=url, count=inserted)`
-- Attach context as keyword arguments, not in the message string.
+- Do not use `print()` for runtime diagnostics inside app code.
+- First log argument should be a short event name, e.g. `logger.info("bootstrap_completed", ...)`.
+- Put structured details in keyword arguments, not interpolated message strings.
 
-## Async, Database, And Integrations
+## Async, Database, And Integration Notes
 
-- All I/O paths are async; do not block the event loop.
-- SQLAlchemy sessions are async; follow the existing `async with session_factory()` pattern.
-- The BigQuery Python client is synchronous and runs inside a `ThreadPoolExecutor`
-  (see `app/integrations/bigquery_client.py`). Do not call it directly from async code.
-- The GDELT HTTP ingestion client (`app/integrations/gdelt_http_client.py`) is async
-  and downloads `.export.CSV.zip` files from `data.gdeltproject.org`.
-- Anthropic client calls stay inside `app/integrations/anthropic_client.py`.
+- Keep I/O paths async; do not block the event loop.
+- Use async SQLAlchemy sessions with the existing session factory patterns.
+- GDELT ingestion is HTTP-based and can be long-running on first startup.
+- Startup bootstrap runs automatically when `gdelt_events` is empty.
+- Default `RETENTION_DAYS=30` means roughly 2,880 event files, plus matching mentions and GKG files.
+- If `docker compose up` appears idle during first bootstrap, inspect container logs before assuming a hang.
 
 ## Agent Workflow Guidance
 
-- Read nearby modules and their tests before making any change.
-- Follow existing conventions; this repo values consistency over novelty.
-- When adding behavior, add or update tests alongside the implementation.
-- When touching validation logic, verify both schema behavior (unit) and HTTP response
-  (route-level test in `test_api_events.py`).
-- Do not introduce new tooling, formatters, or architectural layers unless explicitly asked.
-- After any code change: run `ruff check .` then the focused test, then the full suite.
+- Read the implementation file and its nearest tests before editing.
+- Follow existing conventions over clever rewrites.
+- When adding behavior, add or update tests in the same change.
+- After code changes, run `ruff check .`, then focused tests, then the full suite when practical.
+- Do not introduce new tooling, architecture layers, or formatting systems unless explicitly requested.

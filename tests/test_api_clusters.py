@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from app.db.models import StoryCluster
+from app.db.models import RootCluster, StoryCluster
 
 
 def _make_cluster(
@@ -114,3 +114,28 @@ async def test_search_clusters_filters_by_country_code(async_client, api_headers
     data = response.json()
     assert data["total"] == 1
     assert [cluster["cluster_id"] for cluster in data["clusters"]] == ["cluster-us"]
+
+
+async def test_search_clusters_excludes_root_clusters(async_client, api_headers, db_session):
+    db_session.add(_make_cluster("story-only", topic_score=4.5, dominant_countries=["IR"]))
+    db_session.add(
+        RootCluster(
+            cluster_id="root-only",
+            source_url="https://example.com/root-only",
+            event_count=7000,
+            num_articles=5,
+            num_mentions=8,
+            num_sources=3,
+            topic_score=8.2,
+            dominant_countries=["IR"],
+            computed_at=datetime(2026, 3, 10, tzinfo=UTC),
+        )
+    )
+    await db_session.commit()
+
+    response = await async_client.get("/clusters/search?country_code=IR", headers=api_headers)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 1
+    assert [cluster["cluster_id"] for cluster in data["clusters"]] == ["story-only"]

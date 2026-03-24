@@ -8,7 +8,7 @@ from hashlib import sha256
 import pytest
 from sqlalchemy import select
 
-from app.db.models import GdeltEvent, GdeltGkg, GdeltMention, StoryCluster
+from app.db.models import GdeltEvent, GdeltGkg, GdeltMention, RootCluster, StoryCluster
 from app.services.cluster_service import ClusterService, _is_section_url
 
 
@@ -16,6 +16,36 @@ from app.services.cluster_service import ClusterService, _is_section_url
 # with no date prefix, so the same URL always maps to the same row.
 def _expected_cluster_id(source_url: str) -> str:
     return sha256(source_url.encode()).hexdigest()[:24]
+
+
+def _add_many_events(
+    db_session,
+    *,
+    start_event_id: int,
+    count: int,
+    source_url: str,
+    sql_date: int,
+    date_added: int,
+    num_mentions: int = 1,
+    num_sources: int = 1,
+    num_articles: int = 1,
+    action_geo_country_code: str = "IR",
+) -> None:
+    db_session.add_all(
+        [
+            _make_event(
+                start_event_id + index,
+                source_url=source_url,
+                sql_date=sql_date,
+                date_added=date_added + index,
+                num_mentions=num_mentions,
+                num_sources=num_sources,
+                num_articles=num_articles,
+                action_geo_country_code=action_geo_country_code,
+            )
+            for index in range(count)
+        ]
+    )
 
 
 def _make_event(
@@ -131,6 +161,157 @@ async def test_build_and_materialise_creates_story_cluster(db_session) -> None:
     assert sorted(cluster.organizations or []) == ["IRGC"]
     assert sorted(cluster.gkg_locations or []) == ["Tehran, Tehran, Iran"]
     assert cluster.document_tone_avg == pytest.approx(-8.0)
+
+
+async def test_build_and_materialise_moves_large_cluster_to_root_clusters_only(db_session) -> None:
+    source_url = "https://example.com/root-story"
+    _add_many_events(
+        db_session,
+        start_event_id=100000,
+        count=6001,
+        source_url=source_url,
+        sql_date=20260301,
+        date_added=20260301000000,
+    )
+    await db_session.commit()
+
+    count = await ClusterService(db_session).build_and_materialise(20260301000000)
+    await db_session.commit()
+
+    story_rows = (await db_session.execute(select(StoryCluster))).scalars().all()
+    root_rows = (await db_session.execute(select(RootCluster))).scalars().all()
+
+    assert count == 1
+    assert story_rows == []
+    assert len(root_rows) == 1
+    assert root_rows[0].cluster_id == _expected_cluster_id(source_url)
+    assert root_rows[0].event_count == 6001
+
+
+async def test_build_and_materialise_uses_strict_root_threshold_boundary(db_session) -> None:
+    story_source_url = "https://example.com/story-threshold"
+    root_source_url = "https://example.com/root-threshold"
+    _add_many_events(
+        db_session,
+        start_event_id=200000,
+        count=5000,
+        source_url=story_source_url,
+        sql_date=20260302,
+        date_added=20260302000000,
+    )
+    _add_many_events(
+        db_session,
+        start_event_id=300000,
+        count=5001,
+        source_url=root_source_url,
+        sql_date=20260302,
+        date_added=20260302010000,
+    )
+    await db_session.commit()
+
+    count = await ClusterService(db_session).build_and_materialise(20260302000000)
+    await db_session.commit()
+
+    story_rows = (await db_session.execute(select(StoryCluster))).scalars().all()
+    root_rows = (await db_session.execute(select(RootCluster))).scalars().all()
+
+    assert count == 2
+    assert [row.cluster_id for row in story_rows] == [_expected_cluster_id(story_source_url)]
+    assert [row.cluster_id for row in root_rows] == [_expected_cluster_id(root_source_url)]
+    assert story_rows[0].event_count == 5000
+    assert root_rows[0].event_count == 5001
+
+
+async def test_build_and_materialise_reconciles_story_to_root_on_rerun(db_session) -> None:
+    source_url = "https://example.com/flip-story-to-root"
+    _add_many_events(
+        db_session,
+        start_event_id=400000,
+        count=10,
+        source_url=source_url,
+        sql_date=20260303,
+        date_added=20260303000000,
+        num_mentions=500,
+        num_sources=50,
+        num_articles=500,
+    )
+    await db_session.commit()
+
+    first_count = await ClusterService(db_session).build_and_materialise(
+        20260303000000, 20260303000009
+    )
+    await db_session.commit()
+
+    assert first_count == 1
+    assert (await db_session.execute(select(StoryCluster))).scalars().all()
+    assert (await db_session.execute(select(RootCluster))).scalars().all() == []
+
+    _add_many_events(
+        db_session,
+        start_event_id=500000,
+        count=5001,
+        source_url=source_url,
+        sql_date=20260304,
+        date_added=20260304000000,
+    )
+    await db_session.commit()
+
+    second_count = await ClusterService(db_session).build_and_materialise(20260304000000)
+    await db_session.commit()
+
+    story_rows = (await db_session.execute(select(StoryCluster))).scalars().all()
+    root_rows = (await db_session.execute(select(RootCluster))).scalars().all()
+
+    assert second_count == 1
+    assert story_rows == []
+    assert len(root_rows) == 1
+    assert root_rows[0].cluster_id == _expected_cluster_id(source_url)
+
+
+async def test_build_and_materialise_reconciles_root_to_story_on_rerun(db_session) -> None:
+    source_url = "https://example.com/flip-root-to-story"
+    _add_many_events(
+        db_session,
+        start_event_id=600000,
+        count=5001,
+        source_url=source_url,
+        sql_date=20260305,
+        date_added=20260305000000,
+    )
+    await db_session.commit()
+
+    first_count = await ClusterService(db_session).build_and_materialise(20260305000000)
+    await db_session.commit()
+
+    assert first_count == 1
+    assert (await db_session.execute(select(StoryCluster))).scalars().all() == []
+    assert (await db_session.execute(select(RootCluster))).scalars().all()
+
+    _add_many_events(
+        db_session,
+        start_event_id=700000,
+        count=10,
+        source_url=source_url,
+        sql_date=20260306,
+        date_added=20260306000000,
+        num_mentions=500,
+        num_sources=50,
+        num_articles=500,
+    )
+    await db_session.commit()
+
+    second_count = await ClusterService(db_session).build_and_materialise(
+        20260306000000, 20260306000009
+    )
+    await db_session.commit()
+
+    story_rows = (await db_session.execute(select(StoryCluster))).scalars().all()
+    root_rows = (await db_session.execute(select(RootCluster))).scalars().all()
+
+    assert second_count == 1
+    assert len(story_rows) == 1
+    assert root_rows == []
+    assert story_rows[0].cluster_id == _expected_cluster_id(source_url)
 
 
 async def test_build_and_materialise_excludes_blocklisted_domains(db_session) -> None:

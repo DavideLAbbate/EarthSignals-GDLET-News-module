@@ -237,15 +237,15 @@ async def test_run_bootstrap_range_ingests_requested_window_and_persists_until_w
         ]
     )
     mock_gdelt_client.fetch_master_mentions_urls = AsyncMock(
-        side_effect=[
-            [("https://fake/20260301000000.mentions.CSV.zip", 20260301000000)],
-            [("https://fake/20260301120000.mentions.CSV.zip", 20260301120000)],
+        return_value=[
+            ("https://fake/20260301000000.mentions.CSV.zip", 20260301000000),
+            ("https://fake/20260301120000.mentions.CSV.zip", 20260301120000),
         ]
     )
     mock_gdelt_client.fetch_master_gkg_urls = AsyncMock(
-        side_effect=[
-            [("https://fake/20260301000000.gkg.csv.zip", 20260301000000)],
-            [("https://fake/20260301120000.gkg.csv.zip", 20260301120000)],
+        return_value=[
+            ("https://fake/20260301000000.gkg.csv.zip", 20260301000000),
+            ("https://fake/20260301120000.gkg.csv.zip", 20260301120000),
         ]
     )
     mock_gdelt_client.download_events = AsyncMock(
@@ -325,6 +325,71 @@ async def test_run_bootstrap_range_uses_bulk_insert_events(mock_gdelt_client, db
 
     assert result["status"] == "completed"
     mock_bulk_insert.assert_awaited_once_with(db_session, expected_events)
+
+
+@pytest.mark.asyncio
+async def test_run_bootstrap_range_fetches_mentions_and_gkg_indexes_once(
+    mock_gdelt_client, db_session
+):
+    """Explicit-range bootstrap should fetch each sidecar master index only once per run."""
+    from app.services import ingestion_service
+
+    since_ts = 20260301000000
+    until_ts = 20260301120000
+
+    mock_gdelt_client.fetch_master_export_urls = AsyncMock(
+        return_value=[
+            (f"https://fake/{since_ts}.export.CSV.zip", since_ts),
+            (f"https://fake/{until_ts}.export.CSV.zip", until_ts),
+        ]
+    )
+    mock_gdelt_client.fetch_master_mentions_urls = AsyncMock(
+        return_value=[
+            (f"https://fake/{since_ts}.mentions.CSV.zip", since_ts),
+            (f"https://fake/{until_ts}.mentions.CSV.zip", until_ts),
+        ]
+    )
+    mock_gdelt_client.fetch_master_gkg_urls = AsyncMock(
+        return_value=[
+            (f"https://fake/{since_ts}.gkg.csv.zip", since_ts),
+            (f"https://fake/{until_ts}.gkg.csv.zip", until_ts),
+        ]
+    )
+    mock_gdelt_client.download_events = AsyncMock(
+        side_effect=[
+            [_make_gdelt_row(GLOBALEVENTID=1, DATEADDED=since_ts)],
+            [_make_gdelt_row(GLOBALEVENTID=2, DATEADDED=until_ts)],
+        ]
+    )
+    mock_gdelt_client.download_mentions = AsyncMock(
+        side_effect=[
+            [_make_mentions_row(GLOBALEVENTID=1, MentionIdentifier="https://example.com/story-1")],
+            [_make_mentions_row(GLOBALEVENTID=2, MentionIdentifier="https://example.com/story-2")],
+        ]
+    )
+    mock_gdelt_client.download_gkg = AsyncMock(
+        side_effect=[
+            [_make_gkg_row(GKGRECORDID="1", DocumentIdentifier="https://example.com/story-1")],
+            [_make_gkg_row(GKGRECORDID="2", DocumentIdentifier="https://example.com/story-2")],
+        ]
+    )
+
+    with patch.object(ingestion_service, "_get_gdelt_client", return_value=mock_gdelt_client):
+        result = await ingestion_service.run_bootstrap_range(
+            db_session,
+            since_ts=since_ts,
+            until_ts=until_ts,
+        )
+
+    assert result["status"] == "completed"
+    mock_gdelt_client.fetch_master_mentions_urls.assert_awaited_once_with(
+        since_ts=since_ts,
+        until_ts=until_ts,
+    )
+    mock_gdelt_client.fetch_master_gkg_urls.assert_awaited_once_with(
+        since_ts=since_ts,
+        until_ts=until_ts,
+    )
 
 
 @pytest.mark.asyncio

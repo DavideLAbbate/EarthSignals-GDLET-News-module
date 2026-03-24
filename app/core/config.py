@@ -96,6 +96,11 @@ class Settings(BaseSettings):
     # Env var: CLUSTER_REQUIRE_MENTIONS (true/false)
     cluster_require_mentions: bool = Field(default=True)
 
+    # Merged clusters with event_count strictly greater than this threshold are
+    # materialised into root_clusters instead of story_clusters.
+    # Env var: ROOT_CLUSTER_MIN_EVENT_COUNT
+    root_cluster_min_event_count: int = Field(default=5000, ge=0)
+
     @field_validator("cluster_section_path_segments", mode="before")
     @classmethod
     def parse_section_path_segments(
@@ -131,9 +136,11 @@ class Settings(BaseSettings):
                 "www.winnipegfreepress.com",
                 "www.bignewsnetwork.com",
                 "www.miragenews.com",
-                "countercurrents.org",
                 "www.globalsecurity.org",
                 "www.gazetteandherald.co.uk",
+                "www.newkerala.com",       # 17k eventi, press release aggregator puro
+                "allafrica.com",           # compare negli >50 eventi/URL, aggrega wire africani
+                "thedailyblog.co.nz",      # 3 URL diversi tutti >175 eventi, blog di opinione che GDELT sovracampiona
             }
         ),
         description="Source URL domains excluded from cluster candidate scoring.",
