@@ -20,7 +20,9 @@ _ROOT_CLUSTER_COLUMNS = len(RootCluster.__table__.columns) - 1
 class RootClusterRepository:
     """Data access layer for the root_clusters table."""
 
-    _TRANSIENT_KEYS: frozenset[str] = frozenset({"gkg_doc_count"})
+    _TRANSIENT_KEYS: frozenset[str] = frozenset(
+        {"gkg_doc_count", "component_source_urls", "component_domains"}
+    )
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from hashlib import sha256
+
 import pytest
 
-from app.integrations.event_enrichment_mapper import compute_topic_score
+from app.integrations.event_enrichment_mapper import compute_component_topic_score
 from app.services.cluster_merger import ClusterMerger, _jaccard
 
 
@@ -106,6 +108,16 @@ def test_merge_empty_list():
     assert merger.merge([]) == []
 
 
+def test_cluster_merger_defaults_match_pipeline_tuning() -> None:
+    merger = ClusterMerger()
+
+    assert merger._mention_overlap_min == 2
+    assert merger._jaccard_threshold == 0.4
+    assert merger._max_merge_day_gap == 2
+    assert merger._max_theme_df == 0.2
+    assert merger._max_themes_for_jaccard == 80
+
+
 def test_merged_cluster_aggregates_event_ids():
     """Fused cluster must contain event_ids from all source clusters."""
     c1 = _make_cluster("c1", ["https://shared.com/x"], ["IRAN"], event_ids=["1", "2"])
@@ -176,11 +188,7 @@ def test_merged_cluster_document_tone_falls_back_to_unweighted_when_no_gkg_doc_c
 
 
 def test_merged_cluster_recalculates_topic_score():
-    """Fused cluster topic_score is recalculated from merged aggregates, not the pre-merge max.
-
-    The merged cluster should have a higher score than either individual cluster because
-    the combined event_count / num_articles / num_mentions / num_sources signals are larger.
-    """
+    """Fused cluster topic_score is recalculated from component breadth, not legacy volume sums."""
     c1 = _make_cluster(
         "c1",
         ["https://shared.com/x"],
@@ -201,24 +209,59 @@ def test_merged_cluster_recalculates_topic_score():
         num_mentions=150,
         num_sources=15,
     )
+    c1["source_url"] = "https://www.reuters.com/world/story-a"
+    c2["source_url"] = "https://apnews.com/article/story-b"
     merger = ClusterMerger(mention_overlap_min=1, jaccard_threshold=0.3)
     result = merger.merge([c1, c2])
-    expected_score = compute_topic_score(
-        event_count=18,
-        num_articles=180,
-        num_mentions=350,
-        num_sources=35,
+    expected_score = compute_component_topic_score(
+        event_id_count=18,
+        source_url_count=2,
+        domain_count=2,
     )
     assert result[0]["topic_score"] == pytest.approx(expected_score)
 
 
-def test_merged_cluster_id_derived_from_highest_scoring_source():
-    """Fused cluster_id must equal the cluster_id of the highest-scoring source cluster."""
+def test_merged_cluster_recalculates_component_topic_score_from_source_url_breadth():
+    c1 = _make_cluster(
+        "c1",
+        ["https://shared.com/x", "https://shared.com/y"],
+        ["IRAN"],
+        topic_score=5.5,
+        event_count=2,
+        event_ids=["1", "2"],
+    )
+    c2 = _make_cluster(
+        "c2",
+        ["https://shared.com/x", "https://shared.com/y"],
+        ["IRAN"],
+        topic_score=4.2,
+        event_count=1,
+        event_ids=["3"],
+    )
+    c1["source_url"] = "https://www.reuters.com/world/story-a"
+    c2["source_url"] = "https://apnews.com/article/story-b"
+
+    merger = ClusterMerger(mention_overlap_min=2, jaccard_threshold=1.0)
+    result = merger.merge([c1, c2])
+
+    assert result[0]["topic_score"] == pytest.approx(
+        compute_component_topic_score(
+            event_id_count=3,
+            source_url_count=2,
+            domain_count=2,
+        )
+    )
+
+
+def test_merged_cluster_id_derived_from_sorted_event_ids():
+    """Fused cluster_id must be deterministic from the full sorted event ID set."""
     c1 = _make_cluster("c1", ["https://shared.com/x"], ["IRAN"], topic_score=5.5)
+    c1["event_ids"] = ["10", "20"]
     c2 = _make_cluster("c2", ["https://shared.com/x"], ["IRAN"], topic_score=4.2)
+    c2["event_ids"] = ["30"]
     merger = ClusterMerger(mention_overlap_min=1, jaccard_threshold=0.3)
     result = merger.merge([c1, c2])
-    assert result[0]["cluster_id"] == "c1"
+    assert result[0]["cluster_id"] == sha256("10,20,30".encode()).hexdigest()[:24]
 
 
 def test_merged_cluster_unions_themes():
@@ -348,9 +391,9 @@ def test_high_frequency_theme_is_excluded_from_index_with_many_clusters():
     )
     result = merger.merge(clusters + [c_a, c_b])
     # ca and cb share only COMMON_THEME which is excluded → must remain separate
-    result_ids = {c["cluster_id"] for c in result}
-    assert "ca" in result_ids
-    assert "cb" in result_ids
+    result_urls = {c["source_url"] for c in result}
+    assert "https://example.com/ca" in result_urls
+    assert "https://example.com/cb" in result_urls
 
 
 # ── no size cap ───────────────────────────────────────────────────────────────

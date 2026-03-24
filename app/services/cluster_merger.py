@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import UTC, date, datetime
+from hashlib import sha256
 from statistics import mean
 from typing import Any
+from urllib.parse import urlparse
 
-from app.integrations.event_enrichment_mapper import compute_topic_score
+from app.integrations.event_enrichment_mapper import compute_component_topic_score
 
 
 # ── Union-Find ───────────────────────────────────────────────────────────────
@@ -104,10 +106,10 @@ class ClusterMerger:
 
     def __init__(
         self,
-        mention_overlap_min: int = 1,
-        jaccard_threshold: float = 0.3,
-        max_themes_for_jaccard: int | None = 50,
-        max_merge_day_gap: int = 3,
+        mention_overlap_min: int = 2,
+        jaccard_threshold: float = 0.4,
+        max_themes_for_jaccard: int | None = 80,
+        max_merge_day_gap: int = 2,
         max_theme_df: float = 0.2,
     ) -> None:
         self._mention_overlap_min = mention_overlap_min
@@ -321,19 +323,21 @@ class ClusterMerger:
         """Fuse a group of related clusters into one representative dict."""
         if len(group) == 1:
             fused = dict(group[0])
+            fused["cluster_id"] = _cluster_id_from_event_ids(fused.get("event_ids") or [])
             fused["computed_at"] = datetime.now(UTC)
             return fused
 
         anchor = max(group, key=lambda c: c["topic_score"])
 
         fused: dict[str, Any] = {
-            "cluster_id": anchor["cluster_id"],
             "source_url": anchor["source_url"],
         }
 
         # List fields — sorted unique union
         for field in _LIST_FIELDS:
             fused[field] = _sorted_unique_union(group, field)
+
+        fused["cluster_id"] = _cluster_id_from_event_ids(fused["event_ids"])
 
         # Summed integer fields (events don't overlap between source URLs)
         for field in _SUM_INT_FIELDS:
@@ -343,13 +347,33 @@ class ClusterMerger:
         # shared mention URLs that triggered the merge
         fused["mention_count"] = len(fused["mention_identifiers"])
 
-        # topic_score — recalculate from merged aggregates rather than taking max of pre-merge
-        # scores, which ignores the compounding signal of the fused cluster
-        fused["topic_score"] = compute_topic_score(
-            event_count=fused["event_count"],
-            num_articles=fused["num_articles"],
-            num_mentions=fused["num_mentions"],
-            num_sources=fused["num_sources"],
+        component_source_urls = sorted(
+            {
+                source_url
+                for cluster in group
+                for source_url in (
+                    cluster.get("component_source_urls")
+                    or ([cluster.get("source_url")] if cluster.get("source_url") else [])
+                )
+                if source_url
+            }
+        )
+        component_domains = sorted(
+            {
+                domain
+                for cluster in group
+                for domain in (
+                    cluster.get("component_domains") or [_extract_domain(cluster.get("source_url"))]
+                )
+                if domain
+            }
+        )
+        fused["component_source_urls"] = component_source_urls
+        fused["component_domains"] = component_domains
+        fused["topic_score"] = compute_component_topic_score(
+            event_id_count=fused["event_count"],
+            source_url_count=len(component_source_urls),
+            domain_count=len(component_domains),
         )
 
         # avg_severity_score — unweighted mean (each source URL contributes one score)
@@ -426,3 +450,19 @@ def _top_values(values: list[str], limit: int = 5) -> list[str]:
     counts = Counter(v for v in values if v and v != "Sconosciuto")
     ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
     return [v for v, _ in ranked[:limit]]
+
+
+def _extract_domain(url: str | None) -> str | None:
+    """Return the lowercased domain for a URL, if present."""
+    if not url:
+        return None
+    parsed = urlparse(url)
+    return parsed.netloc.lower() or None
+
+
+def _cluster_id_from_event_ids(event_ids: list[str] | list[int]) -> str:
+    """Return a deterministic cluster_id from the sorted event IDs."""
+    normalized = ",".join(
+        str(event_id) for event_id in sorted(event_ids, key=lambda value: int(value))
+    )
+    return sha256(normalized.encode()).hexdigest()[:24]

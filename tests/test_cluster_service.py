@@ -8,14 +8,15 @@ from hashlib import sha256
 import pytest
 from sqlalchemy import select
 
+from app.core.config import get_settings
 from app.db.models import GdeltEvent, GdeltGkg, GdeltMention, RootCluster, StoryCluster
+from app.integrations.event_enrichment_mapper import compute_component_topic_score
 from app.services.cluster_service import ClusterService, _is_section_url
 
 
-# cluster_id is now solely a 24-hex-char SHA-256 prefix of the source_url,
-# with no date prefix, so the same URL always maps to the same row.
-def _expected_cluster_id(source_url: str) -> str:
-    return sha256(source_url.encode()).hexdigest()[:24]
+def _expected_cluster_id_for_events(event_ids: list[int]) -> str:
+    joined = ",".join(str(event_id) for event_id in sorted(event_ids))
+    return sha256(joined.encode()).hexdigest()[:24]
 
 
 def _add_many_events(
@@ -142,7 +143,7 @@ async def test_build_and_materialise_creates_story_cluster(db_session) -> None:
     assert len(clusters) == 1
 
     cluster = clusters[0]
-    assert cluster.cluster_id == _expected_cluster_id(source_url)
+    assert cluster.cluster_id == _expected_cluster_id_for_events([101, 102])
     assert cluster.event_count == 2
     assert cluster.num_articles == 1000
     assert cluster.num_mentions == 1000
@@ -184,7 +185,7 @@ async def test_build_and_materialise_moves_large_cluster_to_root_clusters_only(d
     assert count == 1
     assert story_rows == []
     assert len(root_rows) == 1
-    assert root_rows[0].cluster_id == _expected_cluster_id(source_url)
+    assert root_rows[0].cluster_id == _expected_cluster_id_for_events(list(range(100000, 106001)))
     assert root_rows[0].event_count == 6001
 
 
@@ -216,8 +217,12 @@ async def test_build_and_materialise_uses_strict_root_threshold_boundary(db_sess
     root_rows = (await db_session.execute(select(RootCluster))).scalars().all()
 
     assert count == 2
-    assert [row.cluster_id for row in story_rows] == [_expected_cluster_id(story_source_url)]
-    assert [row.cluster_id for row in root_rows] == [_expected_cluster_id(root_source_url)]
+    assert [row.cluster_id for row in story_rows] == [
+        _expected_cluster_id_for_events(list(range(200000, 205000)))
+    ]
+    assert [row.cluster_id for row in root_rows] == [
+        _expected_cluster_id_for_events(list(range(300000, 305001)))
+    ]
     assert story_rows[0].event_count == 5000
     assert root_rows[0].event_count == 5001
 
@@ -265,7 +270,7 @@ async def test_build_and_materialise_reconciles_story_to_root_on_rerun(db_sessio
     assert second_count == 1
     assert story_rows == []
     assert len(root_rows) == 1
-    assert root_rows[0].cluster_id == _expected_cluster_id(source_url)
+    assert root_rows[0].cluster_id == _expected_cluster_id_for_events(list(range(500000, 505001)))
 
 
 async def test_build_and_materialise_reconciles_root_to_story_on_rerun(db_session) -> None:
@@ -311,7 +316,7 @@ async def test_build_and_materialise_reconciles_root_to_story_on_rerun(db_sessio
     assert second_count == 1
     assert len(story_rows) == 1
     assert root_rows == []
-    assert story_rows[0].cluster_id == _expected_cluster_id(source_url)
+    assert story_rows[0].cluster_id == _expected_cluster_id_for_events(list(range(700000, 700010)))
 
 
 async def test_build_and_materialise_excludes_blocklisted_domains(db_session) -> None:
@@ -432,6 +437,437 @@ async def test_build_and_materialise_skips_low_scoring_sources(db_session) -> No
 
     result = await db_session.execute(select(StoryCluster))
     assert result.scalars().all() == []
+
+
+async def test_build_candidate_components_groups_connected_event_and_mention_nodes(
+    db_session,
+) -> None:
+    db_session.add_all(
+        [
+            _make_event(901, source_url="https://example.com/story-a", date_added=20260311010101),
+            _make_event(902, source_url="https://example.com/story-b", date_added=20260311020202),
+            GdeltMention(
+                global_event_id=901,
+                mention_time_date=20260311090000,
+                mention_source_name="shared.example.com",
+                mention_identifier="https://shared.example.com/story",
+            ),
+            GdeltMention(
+                global_event_id=902,
+                mention_time_date=20260311100000,
+                mention_source_name="shared.example.com",
+                mention_identifier="https://shared.example.com/story",
+            ),
+            GdeltMention(
+                global_event_id=902,
+                mention_time_date=20260311110000,
+                mention_source_name="isolated.example.com",
+                mention_identifier="https://isolated.example.com/story",
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    components = await ClusterService(db_session)._build_candidate_components(20260311000000)
+
+    assert len(components) == 1
+    assert components[0]["event_ids"] == {901, 902}
+    assert components[0]["mention_identifiers"] == {
+        "https://shared.example.com/story",
+        "https://isolated.example.com/story",
+    }
+    assert components[0]["source_urls"] == {
+        "https://example.com/story-a",
+        "https://example.com/story-b",
+    }
+
+
+async def test_build_candidate_components_filters_blocklisted_and_section_mentions(
+    db_session,
+) -> None:
+    db_session.add_all(
+        [
+            _make_event(903, source_url="https://example.com/story-a", date_added=20260311010101),
+            _make_event(904, source_url="https://example.com/story-b", date_added=20260311020202),
+            GdeltMention(
+                global_event_id=903,
+                mention_identifier="https://shared.example.com/story",
+                mention_source_name="shared.example.com",
+            ),
+            GdeltMention(
+                global_event_id=904,
+                mention_identifier="https://shared.example.com/story",
+                mention_source_name="shared.example.com",
+            ),
+            GdeltMention(
+                global_event_id=903,
+                mention_identifier="https://www.yahoo.com/news/blocked-story",
+                mention_source_name="yahoo.com",
+            ),
+            GdeltMention(
+                global_event_id=904,
+                mention_identifier="https://www.example.com/category/world/archive-page",
+                mention_source_name="example.com",
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    components = await ClusterService(db_session)._build_candidate_components(20260311000000)
+
+    assert len(components) == 1
+    assert components[0]["mention_identifiers"] == {"https://shared.example.com/story"}
+
+
+async def test_build_candidate_components_omits_singleton_components(db_session) -> None:
+    db_session.add_all(
+        [
+            _make_event(905, source_url="https://example.com/story-a", date_added=20260311010101),
+            _make_event(906, source_url="https://example.com/story-b", date_added=20260311020202),
+            _make_event(907, source_url="https://example.com/story-c", date_added=20260311030303),
+            GdeltMention(
+                global_event_id=905,
+                mention_identifier="https://shared.example.com/story",
+                mention_source_name="shared.example.com",
+            ),
+            GdeltMention(
+                global_event_id=906,
+                mention_identifier="https://shared.example.com/story",
+                mention_source_name="shared.example.com",
+            ),
+            GdeltMention(
+                global_event_id=907,
+                mention_identifier="https://singleton.example.com/story",
+                mention_source_name="singleton.example.com",
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    components = await ClusterService(db_session)._build_candidate_components(20260311000000)
+
+    assert len(components) == 1
+    assert components[0]["event_ids"] == {905, 906}
+
+
+async def test_build_and_materialise_rejects_singleton_components_by_default(db_session) -> None:
+    db_session.add(
+        _make_event(
+            9501,
+            source_url="https://example.com/lone-story",
+            date_added=20260312000000,
+            num_articles=5,
+            num_mentions=1,
+            num_sources=1,
+        )
+    )
+    await db_session.commit()
+
+    count = await ClusterService(db_session).build_and_materialise(20260312000000)
+    await db_session.commit()
+
+    assert count == 0
+    assert (await db_session.execute(select(StoryCluster))).scalars().all() == []
+
+
+def test_component_metrics_capture_size_density_and_time_span() -> None:
+    service = object.__new__(ClusterService)
+    component = {
+        "event_ids": {1001, 1002, 1003},
+        "mention_identifiers": {
+            "https://mentions.example.com/story-a",
+            "https://mentions.example.com/story-b",
+        },
+        "edges": {
+            (1001, "https://mentions.example.com/story-a"),
+            (1002, "https://mentions.example.com/story-a"),
+            (1002, "https://mentions.example.com/story-b"),
+            (1003, "https://mentions.example.com/story-b"),
+        },
+    }
+    events = [
+        _make_event(
+            1001,
+            source_url="https://www.reuters.com/world/story-a",
+            date_added=20260312000000,
+        ),
+        _make_event(
+            1002,
+            source_url="https://apnews.com/article/story-b",
+            date_added=20260312030000,
+        ),
+        _make_event(
+            1003,
+            source_url="https://www.reuters.com/world/story-c",
+            date_added=20260312060000,
+        ),
+    ]
+
+    metrics = service._compute_component_metrics(component, events)
+
+    assert metrics["event_id_count"] == 3
+    assert metrics["source_url_count"] == 3
+    assert metrics["domain_count"] == 2
+    assert metrics["component_density"] == pytest.approx(4 / 6, rel=1e-3)
+    assert metrics["event_time_span_hours"] == pytest.approx(6.0)
+
+
+@pytest.mark.parametrize(
+    ("metric_name", "metric_value", "expected_gate"),
+    [
+        ("event_id_count", 1, "min_event_ids"),
+        ("source_url_count", 1, "min_source_urls"),
+        ("domain_count", 1, "min_domains"),
+        ("event_time_span_hours", 25.0, "max_event_span_hours"),
+        ("component_density", 0.1, "min_density"),
+    ],
+)
+def test_component_gate_rejects_failed_metric(
+    monkeypatch,
+    metric_name: str,
+    metric_value: float | int,
+    expected_gate: str,
+) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "cluster_candidate_min_event_ids", 2)
+    monkeypatch.setattr(settings, "cluster_candidate_min_source_urls", 2)
+    monkeypatch.setattr(settings, "cluster_candidate_min_domains", 2)
+    monkeypatch.setattr(settings, "cluster_candidate_max_event_span_hours", 24.0)
+    monkeypatch.setattr(settings, "cluster_candidate_min_density", 0.5)
+
+    metrics = {
+        "event_id_count": 3,
+        "source_url_count": 3,
+        "domain_count": 3,
+        "event_time_span_hours": 6.0,
+        "component_density": 0.75,
+    }
+    metrics[metric_name] = metric_value
+
+    accepted, failed_gates = object.__new__(ClusterService)._evaluate_component_gates(metrics)
+
+    assert accepted is False
+    assert failed_gates == [expected_gate]
+
+
+def test_component_gate_accepts_when_all_metrics_pass(monkeypatch) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "cluster_candidate_min_event_ids", 2)
+    monkeypatch.setattr(settings, "cluster_candidate_min_source_urls", 2)
+    monkeypatch.setattr(settings, "cluster_candidate_min_domains", 2)
+    monkeypatch.setattr(settings, "cluster_candidate_max_event_span_hours", 24.0)
+    monkeypatch.setattr(settings, "cluster_candidate_min_density", 0.5)
+
+    accepted, failed_gates = object.__new__(ClusterService)._evaluate_component_gates(
+        {
+            "event_id_count": 3,
+            "source_url_count": 3,
+            "domain_count": 2,
+            "event_time_span_hours": 6.0,
+            "component_density": 0.75,
+        }
+    )
+
+    assert accepted is True
+    assert failed_gates == []
+
+
+def test_component_rejection_logs_failed_gates_and_metrics(monkeypatch, mocker) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "cluster_candidate_min_event_ids", 2)
+    monkeypatch.setattr(settings, "cluster_candidate_min_source_urls", 2)
+    monkeypatch.setattr(settings, "cluster_candidate_min_domains", 2)
+    monkeypatch.setattr(settings, "cluster_candidate_max_event_span_hours", 24.0)
+    monkeypatch.setattr(settings, "cluster_candidate_min_density", 0.5)
+
+    component = {
+        "event_ids": {1101, 1102},
+        "mention_identifiers": {"https://shared.example.com/story"},
+        "edges": {
+            (1101, "https://shared.example.com/story"),
+            (1102, "https://shared.example.com/story"),
+        },
+        "source_urls": {"https://example.com/story-a"},
+    }
+    events_by_id = {
+        1101: _make_event(
+            1101,
+            source_url="https://example.com/story-a",
+            date_added=20260312000000,
+        ),
+        1102: _make_event(
+            1102,
+            source_url="https://example.com/story-a",
+            date_added=20260312010000,
+        ),
+    }
+    logger_info = mocker.patch("app.services.cluster_service.logger.info")
+
+    admitted = object.__new__(ClusterService)._admit_component_candidates([component], events_by_id)
+
+    assert admitted == []
+    logger_info.assert_called_once()
+    event_name = logger_info.call_args.args[0]
+    payload = logger_info.call_args.kwargs
+    assert event_name == "cluster_component_rejected"
+    assert payload["failed_gates"] == ["min_source_urls", "min_domains"]
+    assert payload["metrics"] == {
+        "event_id_count": 2,
+        "source_url_count": 1,
+        "domain_count": 1,
+        "component_density": 1.0,
+        "event_time_span_hours": 1.0,
+    }
+    assert payload["component_id"]
+
+
+def test_component_topic_score_uses_component_level_counts() -> None:
+    component = {
+        "event_ids": {1201, 1202, 1203, 1204},
+        "mention_identifiers": {
+            "https://shared.example.com/story-a",
+            "https://shared.example.com/story-b",
+        },
+        "edges": {
+            (1201, "https://shared.example.com/story-a"),
+            (1202, "https://shared.example.com/story-a"),
+            (1203, "https://shared.example.com/story-b"),
+            (1204, "https://shared.example.com/story-b"),
+        },
+        "source_urls": {
+            "https://www.reuters.com/world/story-a",
+            "https://apnews.com/article/story-b",
+            "https://www.bbc.com/news/story-c",
+        },
+    }
+    events_by_id = {
+        1201: _make_event(1201, source_url="https://www.reuters.com/world/story-a"),
+        1202: _make_event(1202, source_url="https://apnews.com/article/story-b"),
+        1203: _make_event(1203, source_url="https://www.bbc.com/news/story-c"),
+        1204: _make_event(1204, source_url="https://www.reuters.com/world/story-a"),
+    }
+
+    admitted = object.__new__(ClusterService)._admit_component_candidates([component], events_by_id)
+
+    assert len(admitted) == 1
+    assert admitted[0]["topic_score"] == compute_component_topic_score(
+        event_id_count=4,
+        source_url_count=3,
+        domain_count=3,
+    )
+
+
+async def test_build_and_materialise_uses_component_candidates_instead_of_single_source_url(
+    db_session,
+) -> None:
+    source_url_a = "https://www.reuters.com/world/story-a"
+    source_url_b = "https://apnews.com/article/story-b"
+    shared_mention = "https://shared.example.com/story"
+    db_session.add_all(
+        [
+            _make_event(
+                1301,
+                source_url=source_url_a,
+                date_added=20260312000000,
+                num_articles=1,
+                num_mentions=0,
+                num_sources=1,
+            ),
+            _make_event(
+                1302,
+                source_url=source_url_b,
+                date_added=20260312010000,
+                num_articles=1,
+                num_mentions=0,
+                num_sources=1,
+            ),
+            GdeltMention(
+                global_event_id=1301,
+                mention_time_date=20260312090000,
+                mention_source_name="shared.example.com",
+                mention_identifier=shared_mention,
+            ),
+            GdeltMention(
+                global_event_id=1302,
+                mention_time_date=20260312100000,
+                mention_source_name="shared.example.com",
+                mention_identifier=shared_mention,
+            ),
+            GdeltGkg(
+                document_identifier=source_url_a,
+                themes=["IRAN", "ATTACK"],
+                persons=["Person A"],
+                organizations=["Org A"],
+                locations=["Tehran, Tehran, Iran"],
+                document_tone=-5.0,
+            ),
+            GdeltGkg(
+                document_identifier=source_url_b,
+                themes=["IRAN", "SANCTIONS"],
+                persons=["Person B"],
+                organizations=["Org B"],
+                locations=["Washington, District of Columbia, United States"],
+                document_tone=-2.0,
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    count = await ClusterService(db_session).build_and_materialise(20260312000000)
+    await db_session.commit()
+
+    assert count == 1
+
+    cluster = (await db_session.execute(select(StoryCluster))).scalars().one()
+    assert set(cluster.event_ids or []) == {"1301", "1302"}
+    assert cluster.topic_score == pytest.approx(
+        compute_component_topic_score(
+            event_id_count=2,
+            source_url_count=2,
+            domain_count=2,
+        )
+    )
+    assert cluster.cluster_id == _expected_cluster_id_for_events([1301, 1302])
+    assert set(cluster.themes or []) == {"ATTACK", "IRAN", "SANCTIONS"}
+    assert cluster.source_url in {source_url_a, source_url_b}
+
+
+async def test_build_cluster_deduplicates_mention_count_with_shared_identifier(db_session) -> None:
+    service = ClusterService(db_session)
+    events = [
+        _make_event(1401, source_url="https://example.com/story-a"),
+        _make_event(1402, source_url="https://example.com/story-b"),
+    ]
+    mentions = [
+        GdeltMention(
+            global_event_id=1401,
+            mention_identifier="https://shared.example.com/story",
+            mention_source_name="shared.example.com",
+        ),
+        GdeltMention(
+            global_event_id=1402,
+            mention_identifier="https://shared.example.com/story",
+            mention_source_name="shared.example.com",
+        ),
+    ]
+
+    cluster = service._build_cluster(
+        {
+            "cluster_id": _expected_cluster_id_for_events([1401, 1402]),
+            "source_url": "https://example.com/story-a",
+            "event_count": 2,
+            "num_articles": 2,
+            "num_mentions": 2,
+            "num_sources": 2,
+            "topic_score": 1.0,
+        },
+        events,
+        mentions,
+        [],
+    )
+
+    assert cluster["mention_identifiers"] == ["https://shared.example.com/story"]
+    assert cluster["mention_count"] == 1
 
 
 async def test_build_and_materialise_accepts_date_only_integer_since(db_session) -> None:

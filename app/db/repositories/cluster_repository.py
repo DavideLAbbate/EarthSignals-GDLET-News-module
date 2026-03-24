@@ -30,7 +30,9 @@ class ClusterRepository:
         self._session = session
 
     # Keys that are used internally during cluster building/merging but are not DB columns
-    _TRANSIENT_KEYS: frozenset[str] = frozenset({"gkg_doc_count"})
+    _TRANSIENT_KEYS: frozenset[str] = frozenset(
+        {"gkg_doc_count", "component_source_urls", "component_domains"}
+    )
 
     async def upsert(self, cluster_dict: dict[str, Any]) -> None:
         """Insert or update a story cluster row keyed by cluster_id.

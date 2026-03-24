@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from hashlib import sha256
 from statistics import mean
 from typing import Any
+from urllib.parse import urlparse
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +22,7 @@ from app.db.repositories.gkg_repository import GkgRepository
 from app.db.repositories.mentions_repository import MentionsRepository
 from app.db.repositories.root_cluster_repository import RootClusterRepository
 from app.integrations.event_enrichment_mapper import (
+    compute_component_topic_score,
     compute_severity_score,
     compute_topic_score,
     get_event_root_code_label,
@@ -200,6 +202,226 @@ class ClusterService:
                 gkg_by_identifier.setdefault(row.document_identifier, []).append(row)
         return gkg_by_identifier
 
+    async def _collect_windowed_events(
+        self,
+        since_date_added: int,
+        until_date_added: int | None = None,
+    ) -> list[GdeltEvent]:
+        """Return windowed events that can participate in component discovery."""
+        filters = [
+            GdeltEvent.date_added >= since_date_added,
+            GdeltEvent.source_url.is_not(None),
+        ]
+        if until_date_added is not None:
+            filters.append(GdeltEvent.date_added <= until_date_added)
+        result = await self._session.execute(
+            select(GdeltEvent)
+            .where(*filters)
+            .order_by(GdeltEvent.date_added.asc(), GdeltEvent.global_event_id.asc())
+        )
+        return list(result.scalars().all())
+
+    async def _collect_windowed_mentions(self, event_ids: list[int]) -> list[GdeltMention]:
+        """Return mentions attached to the given windowed event IDs."""
+        if not event_ids:
+            return []
+        return await self._mentions_repo.get_by_event_ids(event_ids)
+
+    async def _build_candidate_components(
+        self,
+        since_date_added: int,
+        until_date_added: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Build connected event/mention components for the candidate window."""
+        events = await self._collect_windowed_events(since_date_added, until_date_added)
+        if not events:
+            return []
+
+        events_by_id = {event.global_event_id: event for event in events}
+        mentions = self._filter_component_mentions(
+            await self._collect_windowed_mentions(list(events_by_id))
+        )
+
+        return self._derive_candidate_components(events_by_id, mentions)
+
+    def _filter_component_mentions(self, mentions: list[GdeltMention]) -> list[GdeltMention]:
+        """Filter mention nodes that should not participate in the component graph."""
+        settings = get_settings()
+        filtered_mentions: list[GdeltMention] = []
+        for mention in mentions:
+            identifier = mention.mention_identifier
+            if not identifier:
+                continue
+            try:
+                domain = identifier.split("//", 1)[1].split("/", 1)[0].lower()
+            except IndexError:
+                domain = ""
+            if domain in settings.cluster_source_domain_blocklist:
+                continue
+            if _is_section_url(identifier, settings.cluster_section_path_segments):
+                continue
+            filtered_mentions.append(mention)
+        return filtered_mentions
+
+    def _derive_candidate_components(
+        self,
+        events_by_id: dict[int, GdeltEvent],
+        mentions: list[GdeltMention],
+    ) -> list[dict[str, Any]]:
+        """Derive connected components from preloaded windowed events and mentions."""
+        if not events_by_id:
+            return []
+
+        mention_to_event_ids: dict[str, set[int]] = {}
+        event_to_mentions: dict[int, set[str]] = {event_id: set() for event_id in events_by_id}
+        for mention in mentions:
+            if not mention.mention_identifier or mention.global_event_id not in events_by_id:
+                continue
+            mention_to_event_ids.setdefault(mention.mention_identifier, set()).add(
+                mention.global_event_id
+            )
+            event_to_mentions.setdefault(mention.global_event_id, set()).add(
+                mention.mention_identifier
+            )
+
+        components: list[dict[str, Any]] = []
+        remaining_event_ids = set(events_by_id)
+        while remaining_event_ids:
+            root_event_id = remaining_event_ids.pop()
+            stack = [root_event_id]
+            component_event_ids = {root_event_id}
+            component_mentions: set[str] = set()
+            component_edges: set[tuple[int, str]] = set()
+            expanded_mentions: set[str] = set()
+
+            while stack:
+                current_event_id = stack.pop()
+                for mention_identifier in event_to_mentions.get(current_event_id, set()):
+                    component_edges.add((current_event_id, mention_identifier))
+                    component_mentions.add(mention_identifier)
+                    if mention_identifier in expanded_mentions:
+                        continue
+                    expanded_mentions.add(mention_identifier)
+                    for neighbor_event_id in mention_to_event_ids.get(mention_identifier, set()):
+                        component_edges.add((neighbor_event_id, mention_identifier))
+                        if neighbor_event_id in component_event_ids:
+                            continue
+                        component_event_ids.add(neighbor_event_id)
+                        remaining_event_ids.discard(neighbor_event_id)
+                        stack.append(neighbor_event_id)
+
+            if len(component_event_ids) < 2:
+                continue
+
+            components.append(
+                {
+                    "event_ids": component_event_ids,
+                    "mention_identifiers": component_mentions,
+                    "edges": component_edges,
+                    "source_urls": {
+                        events_by_id[event_id].source_url
+                        for event_id in component_event_ids
+                        if events_by_id[event_id].source_url
+                    },
+                }
+            )
+
+        return components
+
+    def _compute_component_metrics(
+        self,
+        component: dict[str, Any],
+        events: list[GdeltEvent],
+    ) -> dict[str, float | int]:
+        """Compute explicit structural metrics for a component candidate."""
+        source_urls = {event.source_url for event in events if event.source_url}
+        domains = {
+            parsed.netloc.lower()
+            for parsed in (urlparse(source_url) for source_url in source_urls)
+            if parsed.netloc
+        }
+        event_count = len(component["event_ids"])
+        mention_count = len(component["mention_identifiers"])
+        max_possible_edges = event_count * mention_count
+        edge_count = len(component.get("edges", set()))
+        date_added_values = [event.date_added for event in events if event.date_added is not None]
+        event_time_span_hours = 0.0
+        if len(date_added_values) >= 2:
+            start_dt = _parse_gdelt_timestamp(min(date_added_values))
+            end_dt = _parse_gdelt_timestamp(max(date_added_values))
+            event_time_span_hours = (end_dt - start_dt).total_seconds() / 3600
+
+        return {
+            "event_id_count": event_count,
+            "source_url_count": len(source_urls),
+            "domain_count": len(domains),
+            "component_density": (edge_count / max_possible_edges) if max_possible_edges else 0.0,
+            "event_time_span_hours": event_time_span_hours,
+        }
+
+    def _evaluate_component_gates(self, metrics: dict[str, float | int]) -> tuple[bool, list[str]]:
+        """Return whether a component passes admission plus the failed gate names."""
+        settings = get_settings()
+        failed_gates: list[str] = []
+
+        if metrics["event_id_count"] < settings.cluster_candidate_min_event_ids:
+            failed_gates.append("min_event_ids")
+        if metrics["source_url_count"] < settings.cluster_candidate_min_source_urls:
+            failed_gates.append("min_source_urls")
+        if metrics["domain_count"] < settings.cluster_candidate_min_domains:
+            failed_gates.append("min_domains")
+        if metrics["event_time_span_hours"] > settings.cluster_candidate_max_event_span_hours:
+            failed_gates.append("max_event_span_hours")
+        if metrics["component_density"] < settings.cluster_candidate_min_density:
+            failed_gates.append("min_density")
+
+        return not failed_gates, failed_gates
+
+    def _admit_component_candidates(
+        self,
+        components: list[dict[str, Any]],
+        events_by_id: dict[int, GdeltEvent],
+    ) -> list[dict[str, Any]]:
+        """Return admitted component candidates and log explicit rejection reasons."""
+        admitted: list[dict[str, Any]] = []
+        for component in components:
+            component_events = [
+                events_by_id[event_id] for event_id in sorted(component["event_ids"])
+            ]
+            metrics = self._compute_component_metrics(component, component_events)
+            if int(metrics["event_id_count"]) < 2:
+                logger.info(
+                    "cluster_component_rejected",
+                    component_id=_component_identifier(component),
+                    metrics=metrics,
+                    failed_gates=["singleton_component"],
+                )
+                continue
+            accepted, failed_gates = self._evaluate_component_gates(metrics)
+            if not accepted:
+                logger.info(
+                    "cluster_component_rejected",
+                    component_id=_component_identifier(component),
+                    metrics=metrics,
+                    failed_gates=failed_gates,
+                )
+                continue
+
+            admitted.append(
+                {
+                    "component": component,
+                    "events": component_events,
+                    "metrics": metrics,
+                    "topic_score": compute_component_topic_score(
+                        event_id_count=int(metrics["event_id_count"]),
+                        source_url_count=int(metrics["source_url_count"]),
+                        domain_count=int(metrics["domain_count"]),
+                    ),
+                }
+            )
+
+        return admitted
+
     def _build_cluster(
         self,
         doc: dict[str, Any],
@@ -207,20 +429,18 @@ class ClusterService:
         mentions: list[GdeltMention],
         gkg_rows: list[GdeltGkg],
     ) -> dict[str, Any]:
-        """Build a single materialised cluster row.
+        """Build a single materialised cluster row from one admitted component.
 
-        ``gkg_rows`` must contain only the GKG rows whose ``document_identifier``
-        matches the cluster's ``source_url`` — i.e. the GKG record *of* the article
-        itself, not the GKG records of articles that merely cite it. Using mention GKG
-        rows would contaminate themes/persons/organizations with entities from hundreds
-        of unrelated documents.
+        ``gkg_rows`` may contain rows for all source URLs represented in the component.
+        Missing GKG coverage for some URLs is acceptable; the cluster is enriched from
+        whatever component-local GKG rows are available without reaching outside the
+        component boundary.
         """
         source_url = doc["source_url"]
-        # cluster_id must be stable across runs: keyed solely on source_url so that
-        # the same story is always upserted into the same row regardless of which day
-        # the pipeline runs. A date prefix would produce a new cluster_id at midnight,
-        # leaving the previous day's row stale and orphaned.
-        cluster_id = sha256(source_url.encode()).hexdigest()[:24]
+        # cluster_id is derived from the sorted component event IDs so the same story
+        # keeps the same identity across reruns even if its representative source_url
+        # changes or the strongest URL shifts over time.
+        cluster_id = doc["cluster_id"]
 
         event_ids = [str(event.global_event_id) for event in events]
         event_type_labels = [
@@ -278,7 +498,7 @@ class ClusterService:
             "avg_severity_score": round(mean(severities), 2) if severities else None,
             "dominant_countries": _top_values(country_values),
             "dominant_locations": _top_values(location_values),
-            "mention_count": len(mentions),
+            "mention_count": len(mention_identifiers),
             "distinct_mention_sources": mention_sources,
             "mention_identifiers": mention_identifiers,
             "first_mention_at": min(mention_times) if mention_times else None,
@@ -299,7 +519,7 @@ class ClusterService:
         since_dt: datetime | int,
         until_dt: datetime | int | None = None,
     ) -> int:
-        """Build and persist story clusters for candidate source URLs.
+        """Build and persist story clusters for admitted component candidates.
 
         Filters events by ``date_added`` (GDELT YYYYMMDDHHMMSS integer) to honour
         sub-day precision — e.g. a 36-hour rolling window starting mid-day.
@@ -308,78 +528,109 @@ class ClusterService:
         [since_dt, until_dt] window are considered. Useful for backfill runs that
         need to process a fixed slice without bleeding into later data.
 
-        Uses three batch queries (one per table) across all candidates to avoid the
-        N×3 sequential round-trip pattern of the previous per-candidate loop.
+        Uses batched event, mention, and GKG collection so candidate discovery and
+        materialisation operate on connected components rather than legacy source URLs.
         """
         since_date_added = _normalize_since_date_added(since_dt)
         until_date_added = _normalize_since_date_added(until_dt) if until_dt is not None else None
         t0 = time.monotonic()
         try:
-            candidates = await self._score_source_urls(since_date_added, until_date_added)
-            if not candidates:
+            windowed_events = await self._collect_windowed_events(
+                since_date_added, until_date_added
+            )
+            if not windowed_events:
                 return 0
 
-            t_score = time.monotonic()
-            logger.info(
-                "cluster_phase_score",
-                candidates=len(candidates),
-                elapsed_s=round(t_score - t0, 2),
-            )
-
-            # ── Batch query 1: all events for all candidate source URLs ──────────
-            source_urls = [c["source_url"] for c in candidates]
-            events_by_url = await self._batch_collect_events(
-                source_urls, since_date_added, until_date_added
-            )
-            total_events = sum(len(v) for v in events_by_url.values())
+            events_by_id = {event.global_event_id: event for event in windowed_events}
             t_events = time.monotonic()
             logger.info(
                 "cluster_phase_events",
-                total_events=total_events,
-                elapsed_s=round(t_events - t_score, 2),
+                total_events=len(windowed_events),
+                elapsed_s=round(t_events - t0, 2),
             )
 
-            # ── Batch query 2: all mentions for all event IDs ────────────────────
-            all_event_ids: list[int] = [
-                event.global_event_id for url in source_urls for event in events_by_url.get(url, [])
-            ]
-            mentions_by_event = await self._batch_collect_mentions(all_event_ids)
-            total_mentions = sum(len(v) for v in mentions_by_event.values())
+            windowed_mentions = self._filter_component_mentions(
+                await self._collect_windowed_mentions(list(events_by_id))
+            )
+            mentions_by_event: dict[int, list[GdeltMention]] = {}
+            for mention in windowed_mentions:
+                mentions_by_event.setdefault(mention.global_event_id, []).append(mention)
             t_mentions = time.monotonic()
             logger.info(
                 "cluster_phase_mentions",
-                total_mentions=total_mentions,
+                total_mentions=len(windowed_mentions),
                 elapsed_s=round(t_mentions - t_events, 2),
             )
 
-            # ── Batch query 3: GKG rows for the source URLs themselves ───────────
-            # themes/persons/organizations/tone are extracted ONLY from the GKG row
-            # whose document_identifier matches the cluster's source_url. Using GKG
-            # rows from mention_identifiers (documents that cite the source) would
-            # contaminate the cluster with entities from hundreds of unrelated articles.
-            source_gkg_by_url = await self._batch_collect_gkg(source_urls)
+            components = self._derive_candidate_components(events_by_id, windowed_mentions)
+            admitted_candidates = self._admit_component_candidates(components, events_by_id)
+            if not admitted_candidates:
+                return 0
+
+            logger.info(
+                "cluster_phase_components",
+                discovered=len(components),
+                admitted=len(admitted_candidates),
+                elapsed_s=round(time.monotonic() - t_mentions, 2),
+            )
+
+            component_source_urls = sorted(
+                {
+                    source_url
+                    for candidate in admitted_candidates
+                    for source_url in candidate["component"]["source_urls"]
+                }
+            )
+            source_gkg_by_url = await self._batch_collect_gkg(component_source_urls)
             total_gkg = sum(len(v) for v in source_gkg_by_url.values())
             t_gkg = time.monotonic()
             logger.info(
                 "cluster_phase_gkg",
-                unique_identifiers=len(source_urls),
+                unique_identifiers=len(component_source_urls),
                 total_gkg=total_gkg,
                 elapsed_s=round(t_gkg - t_mentions, 2),
             )
 
-            # ── Assemble per-candidate cluster dicts (pure Python, no more I/O) ──
+            # ── Assemble per-component cluster dicts (pure Python, no more I/O) ──
             cluster_rows: list[dict[str, Any]] = []
-            for candidate in candidates:
-                url = candidate["source_url"]
-                events = events_by_url.get(url, [])
-                event_ids_for_url = [e.global_event_id for e in events]
+            for candidate in admitted_candidates:
+                component = candidate["component"]
+                events = candidate["events"]
+                component_urls = sorted(component["source_urls"])
+                representative_url = component_urls[0]
                 mentions: list[GdeltMention] = [
-                    m for eid in event_ids_for_url for m in mentions_by_event.get(eid, [])
+                    mention
+                    for event in events
+                    for mention in mentions_by_event.get(event.global_event_id, [])
                 ]
-                source_gkg_rows: list[GdeltGkg] = source_gkg_by_url.get(url, [])
-                cluster_rows.append(
-                    self._build_cluster(candidate, events, mentions, source_gkg_rows)
+                source_gkg_rows = [
+                    row
+                    for source_url in component_urls
+                    for row in source_gkg_by_url.get(source_url, [])
+                ]
+                cluster_row = self._build_cluster(
+                    {
+                        "source_url": representative_url,
+                        "cluster_id": _component_cluster_id(component["event_ids"]),
+                        "event_count": len(component["event_ids"]),
+                        "num_articles": sum(event.num_articles or 0 for event in events),
+                        "num_mentions": sum(event.num_mentions or 0 for event in events),
+                        "num_sources": sum(event.num_sources or 0 for event in events),
+                        "topic_score": candidate["topic_score"],
+                    },
+                    events,
+                    mentions,
+                    source_gkg_rows,
                 )
+                cluster_row["component_source_urls"] = component_urls
+                cluster_row["component_domains"] = sorted(
+                    {
+                        parsed.netloc.lower()
+                        for parsed in (urlparse(source_url) for source_url in component_urls)
+                        if parsed.netloc
+                    }
+                )
+                cluster_rows.append(cluster_row)
             t_build = time.monotonic()
             logger.info(
                 "cluster_phase_build",
@@ -388,15 +639,14 @@ class ClusterService:
             )
 
             # ── Merge semantically related clusters ──────────────────────────────
-            # mention_overlap_min=2 requires at least two shared mention URLs to merge,
-            # preventing a single high-traffic news wire URL (e.g. Reuters) from fusing
-            # unrelated stories. max_themes_for_jaccard=50 guards against O(n²) explosion.
-            # max_merge_day_gap blocks merges between clusters whose event date ranges are
-            # more than N calendar days apart (configurable via CLUSTER_MAX_MERGE_DAY_GAP).
+            # Merge tuning stays explicit in settings so stricter overlap, Jaccard, and
+            # temporal gates can be tuned without changing the merger implementation.
             merger = ClusterMerger(
-                mention_overlap_min=2,
-                jaccard_threshold=0.3,
+                mention_overlap_min=get_settings().cluster_merge_mention_overlap_min,
+                jaccard_threshold=get_settings().cluster_merge_jaccard_threshold,
+                max_themes_for_jaccard=get_settings().cluster_merge_max_themes_for_jaccard,
                 max_merge_day_gap=get_settings().cluster_max_merge_day_gap,
+                max_theme_df=get_settings().cluster_merge_max_theme_df,
             )
             cluster_rows = merger.merge(cluster_rows)
             t_merge = time.monotonic()
@@ -490,6 +740,17 @@ def _normalize_since_date_added(value: datetime | int) -> int:
 def _parse_gdelt_timestamp(value: int) -> datetime:
     """Convert a GDELT YYYYMMDDHHMMSS integer timestamp into UTC datetime."""
     return datetime.strptime(str(value), "%Y%m%d%H%M%S").replace(tzinfo=UTC)
+
+
+def _component_identifier(component: dict[str, Any]) -> str:
+    """Return a stable identifier for logging component-level decisions."""
+    return _component_cluster_id(component["event_ids"])
+
+
+def _component_cluster_id(event_ids: set[int] | list[int]) -> str:
+    """Return a deterministic cluster identifier from sorted event IDs."""
+    normalized = ",".join(str(event_id) for event_id in sorted(event_ids))
+    return sha256(normalized.encode()).hexdigest()[:24]
 
 
 def _is_section_url(url: str, segments: tuple[str, ...]) -> bool:

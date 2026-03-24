@@ -64,7 +64,11 @@ class Settings(BaseSettings):
     # Set to 0 to require date ranges to overlap or touch; set to a large
     # value (e.g. 9999) to effectively disable the gate.
     # Env var: CLUSTER_MAX_MERGE_DAY_GAP
-    cluster_max_merge_day_gap: int = Field(default=3, ge=0)
+    cluster_merge_mention_overlap_min: int = Field(default=2, ge=1)
+    cluster_merge_jaccard_threshold: float = Field(default=0.4, ge=0.0, le=1.0)
+    cluster_merge_max_themes_for_jaccard: int | None = Field(default=80, ge=1)
+    cluster_max_merge_day_gap: int = Field(default=2, ge=0)
+    cluster_merge_max_theme_df: float = Field(default=0.2, ge=0.0, le=1.0)
 
     # URL path segments that identify section/archive pages rather than individual
     # articles. Candidates whose URL path contains any of these segments are excluded
@@ -100,6 +104,12 @@ class Settings(BaseSettings):
     # materialised into root_clusters instead of story_clusters.
     # Env var: ROOT_CLUSTER_MIN_EVENT_COUNT
     root_cluster_min_event_count: int = Field(default=5000, ge=0)
+
+    cluster_candidate_min_event_ids: int = Field(default=3, ge=1)
+    cluster_candidate_min_source_urls: int = Field(default=2, ge=1)
+    cluster_candidate_min_domains: int = Field(default=2, ge=1)
+    cluster_candidate_max_event_span_hours: float = Field(default=24.0, ge=0.0)
+    cluster_candidate_min_density: float = Field(default=0.0, ge=0.0, le=1.0)
 
     @field_validator("cluster_section_path_segments", mode="before")
     @classmethod
@@ -138,9 +148,9 @@ class Settings(BaseSettings):
                 "www.miragenews.com",
                 "www.globalsecurity.org",
                 "www.gazetteandherald.co.uk",
-                "www.newkerala.com",       # 17k eventi, press release aggregator puro
-                "allafrica.com",           # compare negli >50 eventi/URL, aggrega wire africani
-                "thedailyblog.co.nz",      # 3 URL diversi tutti >175 eventi, blog di opinione che GDELT sovracampiona
+                "www.newkerala.com",  # 17k eventi, press release aggregator puro
+                "allafrica.com",  # compare negli >50 eventi/URL, aggrega wire africani
+                "thedailyblog.co.nz",  # 3 URL diversi tutti >175 eventi, blog di opinione che GDELT sovracampiona
             }
         ),
         description="Source URL domains excluded from cluster candidate scoring.",

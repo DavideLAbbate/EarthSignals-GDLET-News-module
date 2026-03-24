@@ -102,3 +102,17 @@ def compute_topic_score(
         + math.log(num_sources + 1) * 0.1,
         4,
     )
+
+
+def compute_component_topic_score(
+    event_id_count: int,
+    source_url_count: int,
+    domain_count: int,
+) -> float:
+    """Compute a topic score from component-level breadth signals."""
+    return round(
+        math.log(event_id_count + 1) * 0.5
+        + math.log(source_url_count + 1) * 0.3
+        + math.log(domain_count + 1) * 0.2,
+        4,
+    )
