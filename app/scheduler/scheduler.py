@@ -23,6 +23,7 @@ from app.core.logging import get_logger
 from app.db.session import _get_session_factory
 from app.scheduler.cluster_job import run_cluster_job
 from app.scheduler.sync_job import run_gdelt_sync
+from app.services.cluster_enrichment_service import run_cluster_enrichment_batch
 from app.services.event_enrichment_service import run_event_enrichment_batch
 from app.services.ingestion_service import (
     run_bootstrap,
@@ -131,6 +132,22 @@ def add_sync_job(scheduler: AsyncIOScheduler) -> None:
     else:
         logger.info("cluster_materialisation_job_skipped", reason="disabled_by_config")
 
+    if settings.enable_cluster_enrichment:
+        scheduler.add_job(
+            partial(run_cluster_enrichment_job, session_factory),
+            "interval",
+            minutes=settings.cluster_enrichment_interval_minutes,
+            id="gdelt_cluster_enrichment",
+            max_instances=1,
+            replace_existing=True,
+        )
+        logger.info(
+            "cluster_enrichment_job_registered",
+            interval_minutes=settings.cluster_enrichment_interval_minutes,
+        )
+    else:
+        logger.info("cluster_enrichment_job_skipped", reason="disabled_by_config")
+
     # Retention cleanup - daily
     scheduler.add_job(
         partial(run_retention_job, session_factory),
@@ -151,6 +168,13 @@ def add_sync_job(scheduler: AsyncIOScheduler) -> None:
         replace_existing=True,
     )
     logger.info("cluster_terminal_cleanup_job_registered", interval_hours=24)
+
+
+async def trigger_enrichment_now() -> dict[str, Any]:
+    """Trigger an immediate cluster enrichment batch. Used by POST /enrich/trigger."""
+    session_factory = _get_session_factory()
+    logger.info("cluster_enrichment_triggered_manually")
+    return await run_cluster_enrichment_job(session_factory)
 
 
 async def trigger_sync_now() -> None:
@@ -180,10 +204,34 @@ async def trigger_startup_ingestion_if_needed() -> None:
 async def trigger_cluster_job_on_startup() -> None:
     """Run one cluster materialisation pass on startup so clusters are available immediately.
 
-    Without this trigger the first cluster appears only after the first scheduled
-    interval fires (up to 24 hours after deploy on a fresh instance).
+    Skipped when clusters were already materialised within the last
+    cluster_interval_minutes, preventing redundant full runs on every container
+    restart.
     """
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import func, select
+
+    from app.db.models import StoryCluster
+
+    settings = get_settings()
     session_factory = _get_session_factory()
+
+    async with session_factory() as session:
+        result = await session.execute(select(func.max(StoryCluster.computed_at)))
+        last_run: datetime | None = result.scalar_one_or_none()
+
+    if last_run is not None:
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=settings.cluster_interval_minutes)
+        if last_run >= cutoff:
+            logger.info(
+                "startup_cluster_skipped",
+                reason="recent_run_exists",
+                last_run=last_run.isoformat(),
+                interval_minutes=settings.cluster_interval_minutes,
+            )
+            return
+
     logger.info("startup_cluster_triggered")
     count = await run_cluster_job(session_factory)
     logger.info("startup_cluster_completed", count=count)
@@ -237,3 +285,23 @@ async def run_event_enrichment_job(
             session,
             batch_size=settings.event_enrichment_batch_size,
         )
+
+
+async def run_cluster_enrichment_job(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> dict[str, Any]:
+    """Run one cluster enrichment batch (story + root) with fresh DB sessions."""
+    settings = get_settings()
+    batch_size = settings.cluster_enrichment_batch_size
+
+    async with session_factory() as session:
+        story_result = await run_cluster_enrichment_batch(
+            session, batch_size=batch_size, table="story"
+        )
+
+    async with session_factory() as session:
+        root_result = await run_cluster_enrichment_batch(
+            session, batch_size=batch_size, table="root"
+        )
+
+    return {"story": story_result, "root": root_result}

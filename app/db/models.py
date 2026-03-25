@@ -253,7 +253,23 @@ class StoryCluster(Base):
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )
 
-    __table_args__ = (Index("ix_story_clusters_topic_score", "topic_score"),)
+    # ── LLM enrichment ─────────────────────────────────────────────────────
+    article_title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    article_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cited_sources: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    main_topics: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    keywords: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    entities: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    enrichment_status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="pending"
+    )
+    enriched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    enrichment_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("ix_story_clusters_topic_score", "topic_score"),
+        Index("ix_story_clusters_enrichment_status", "enrichment_status"),
+    )
 
 
 class RootCluster(Base):
@@ -308,7 +324,23 @@ class RootCluster(Base):
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )
 
-    __table_args__ = (Index("ix_root_clusters_topic_score", "topic_score"),)
+    # ── LLM enrichment ─────────────────────────────────────────────────────
+    article_title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    article_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cited_sources: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    main_topics: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    keywords: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    entities: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    enrichment_status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="pending"
+    )
+    enriched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    enrichment_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("ix_root_clusters_topic_score", "topic_score"),
+        Index("ix_root_clusters_enrichment_status", "enrichment_status"),
+    )
 
 
 class ClusterComponent(Base):

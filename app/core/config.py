@@ -50,10 +50,13 @@ class Settings(BaseSettings):
     event_enrichment_batch_size: int = Field(default=100, ge=1, le=10_000)
     enable_cluster_materialisation: bool = Field(default=True)
     cluster_interval_minutes: int = Field(default=1440, ge=1, le=1440)
+    enable_cluster_enrichment: bool = Field(default=False)
+    cluster_enrichment_interval_minutes: int = Field(default=30, ge=1, le=1440)
+    cluster_enrichment_batch_size: int = Field(default=20, ge=1, le=1_000)
     event_enrichment_service_base_url: AnyHttpUrl = Field(
         default_factory=lambda: TypeAdapter(AnyHttpUrl).validate_python("http://localhost:8001"),
     )
-    event_enrichment_service_timeout_seconds: float = Field(default=10.0, ge=1.0, le=120.0)
+    event_enrichment_service_timeout_seconds: float = Field(default=10.0, ge=1.0, le=300.0)
 
     # ── Rate Limiting ─────────────────────────────────────────────────────
     rate_limit_per_minute: int = Field(default=10, ge=1, le=1000)

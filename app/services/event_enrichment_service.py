@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import datetime, timezone
 from typing import TypedDict
 
@@ -9,9 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
 from app.db.repositories import event_repository
+from app.db.repositories.mentions_repository import MentionsRepository
 from app.integrations.article_extractor import extract_article_content as extract_article_payload
-from app.integrations.event_enrichment_client import enrich_article_content
 from app.integrations.article_fetcher import fetch_article_html
+from app.integrations.event_enrichment_client import enrich_article_content
 
 logger = get_logger(__name__)
 
@@ -66,8 +68,20 @@ async def run_event_enrichment_batch(
     *,
     batch_size: int,
 ) -> dict[str, int]:
-    """Process a deterministic batch of pending events independently."""
+    """Process a deterministic batch of pending events independently.
+
+    Per-event URL resolution follows the paper's architecture:
+      1. mention_identifiers from gdelt_mentions are the primary document unit;
+      2. source_url from gdelt_events is appended as a fallback only when not
+         already present in the mention list.
+
+    Within a batch, results are cached by URL so that multiple events sharing
+    the same mention_identifier trigger only one fetch + LLM call.
+    """
     candidates = await event_repository.get_pending_enrichment_candidates(session, limit=batch_size)
+
+    # Extract all needed data from ORM objects immediately, before any further
+    # DB operations expire the session state and trigger sync lazy-loads.
     candidate_rows = [
         {
             "global_event_id": event.global_event_id,
@@ -75,18 +89,54 @@ async def run_event_enrichment_batch(
         }
         for event in candidates
     ]
+
+    # Batch-load mentions for all candidate events in one round-trip.
+    event_ids = [row["global_event_id"] for row in candidate_rows]
+    mentions_repo = MentionsRepository(session)
+    all_mentions = await mentions_repo.get_by_event_ids(event_ids)
+
+    # Build event_id → ordered list of mention_identifier URLs.
+    event_mention_urls: dict[int, list[str]] = defaultdict(list)
+    for mention in all_mentions:
+        if mention.mention_identifier and mention.mention_identifier.strip():
+            event_mention_urls[mention.global_event_id].append(mention.mention_identifier)
+
     summary = {"selected": len(candidate_rows), "enriched": 0, "failed": 0, "skipped": 0}
 
-    for candidate in candidate_rows:
+    logger.info(
+        "event_enrichment_batch_started",
+        selected=len(candidate_rows),
+        unique_events_with_mentions=len(event_mention_urls),
+        total_mention_urls=sum(len(v) for v in event_mention_urls.values()),
+    )
+
+    # mention_identifier (or source_url) → EnrichedArticleContent | Exception
+    _url_cache: dict[str, EnrichedArticleContent | Exception] = {}
+
+    for i, candidate in enumerate(candidate_rows):
         global_event_id = candidate["global_event_id"]
         source_url = candidate["source_url"]
 
+        # mention_identifiers are the primary unit; source_url is a fallback.
+        urls_to_try: list[str] = list(event_mention_urls.get(global_event_id, []))
+        if _has_source_url(source_url) and source_url not in urls_to_try:
+            urls_to_try.append(source_url)  # type: ignore[arg-type]
+
+        logger.info(
+            "event_enrichment_candidate",
+            progress=f"{i + 1}/{len(candidate_rows)}",
+            global_event_id=global_event_id,
+            urls_to_try=len(urls_to_try),
+            cache_size=len(_url_cache),
+        )
+
         try:
-            if not _has_source_url(source_url):
+            if not urls_to_try:
+                logger.warning("event_enrichment_no_urls", global_event_id=global_event_id)
                 persisted_failed_status = await _persist_failed_status(
                     session,
                     global_event_id,
-                    error_message="missing source_url",
+                    error_message="no fetchable URL (no mention_identifiers, no source_url)",
                 )
                 summary[_failure_summary_bucket(persisted_failed_status)] += 1
                 continue
@@ -97,14 +147,12 @@ async def run_event_enrichment_batch(
             )
             if not claimed:
                 await session.rollback()
+                logger.warning("event_enrichment_claim_failed", global_event_id=global_event_id)
                 summary["skipped"] += 1
                 continue
 
-            if source_url is None:
-                raise ValueError("missing source_url")
+            enriched_article = await _enrich_from_url_list(urls_to_try, _url_cache)
 
-            extracted_article = await _extract_article_content(source_url)
-            enriched_article = await _enrich_article_content(extracted_article)
             updated = await _persist_successful_enrichment(
                 session,
                 global_event_id,
@@ -115,7 +163,18 @@ async def run_event_enrichment_batch(
 
             await _commit_transaction(session)
             summary["enriched"] += 1
+            logger.info(
+                "event_enrichment_succeeded",
+                global_event_id=global_event_id,
+                article_title=enriched_article.get("article_title"),
+            )
+
         except Exception as exc:
+            logger.warning(
+                "event_enrichment_row_failed",
+                global_event_id=global_event_id,
+                error=_stringify_error(exc),
+            )
             persisted_failed_status = await _record_row_failure(
                 session,
                 global_event_id,
@@ -124,7 +183,53 @@ async def run_event_enrichment_batch(
             summary[_failure_summary_bucket(persisted_failed_status)] += 1
             continue
 
+    logger.info("event_enrichment_batch_completed", **summary)
     return summary
+
+
+async def _enrich_from_url_list(
+    urls: list[str],
+    cache: dict[str, EnrichedArticleContent | Exception],
+) -> EnrichedArticleContent:
+    """Try each URL in order, returning the first successful enrichment.
+
+    Results (both success and failure) are stored in cache so subsequent events
+    sharing the same mention_identifier avoid redundant fetch + LLM calls.
+    Raises the last encountered exception when all URLs are exhausted.
+    """
+    last_exc: Exception | None = None
+
+    for url in urls:
+        cached = cache.get(url)
+
+        if isinstance(cached, Exception):
+            last_exc = cached
+            continue  # already known to fail — skip without retrying
+
+        if cached is not None:
+            logger.info("event_enrichment_url_cache_hit", url=url)
+            return cached
+
+        try:
+            logger.info("event_enrichment_fetching", url=url)
+            extracted = await _extract_article_content(url)
+            logger.info(
+                "event_enrichment_fetch_ok",
+                url=url,
+                content_length=len(extracted.get("content", "")),
+            )
+            logger.info("event_enrichment_calling_llm", url=url)
+            enriched = await _enrich_article_content(extracted)
+            logger.info("event_enrichment_llm_ok", url=url)
+            cache[url] = enriched
+            return enriched
+        except Exception as exc:
+            logger.warning("event_enrichment_url_failed", url=url, error=_stringify_error(exc))
+            cache[url] = exc
+            last_exc = exc
+            continue
+
+    raise last_exc or RuntimeError("all candidate URLs failed without a recorded error")
 
 
 async def _commit_transaction(session: AsyncSession) -> None:
