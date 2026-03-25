@@ -224,3 +224,62 @@ La forza architetturale del sistema sta nel fatto che ogni passaggio ha una resp
 - l'API espone solo viste gia' consolidate.
 
 In questo senso, il sistema non e' solo un algoritmo di clustering. E' una pipeline editoriale deterministica che trasforma segnali eterogenei in oggetti narrativi stabili.
+
+---
+
+## LLM Enrichment dei cluster
+
+### Motivazione
+
+Il pipeline di clustering produce unita' editoriali strutturalmente solide — componenti connessi, score di copertura, layer evento/mention/GKG — ma non produce linguaggio naturale. Un cluster sa quanti eventi lo compongono, quali paesi dominano, quali temi GKG emergono. Non sa cosa dice l'articolo, chi cita, di cosa parla in modo comprensibile a un consumatore finale.
+
+L'enrichment LLM risolve questo gap aggiungendo al cluster una voce editoriale: titolo canonico, sommario neutro, entita' estratte dal testo, topics e keywords derivati dal contenuto reale del documento, non dai codici GDELT.
+
+### Unita' di enrichment
+
+L'unita' di enrichment e' il cluster, non il singolo evento. Questa scelta e' coerente con il principio architetturale del sistema: il cluster e' la prima unita' stabile e interrogabile; arricchire i singoli eventi sarebbe ridondante e disallineato rispetto a cio' che viene esposto dall'API.
+
+I campi LLM vengono scritti direttamente su `story_clusters` e `root_clusters` come colonne native, senza tabelle satellite. Il cluster e' gia' una vista materializzata pronta per la query; l'enrichment ne completa la rappresentazione senza introdurre join aggiuntivi.
+
+### URL resolution
+
+Ogni cluster porta gia' con se' i `mention_identifiers` aggregati durante la materializzazione. Questi sono gli URL di tutti i documenti che hanno citato o rilanciato gli eventi del componente. Sono la fonte primaria per il fetch: rappresentano la propagazione reale della storia, non un singolo documento sorgente.
+
+La risoluzione avviene in ordine:
+
+1. si tenta ogni `mention_identifier` del cluster;
+2. se tutti falliscono, si usa `source_url` come fallback.
+
+Il primo URL che restituisce contenuto testuale valido viene usato per la chiamata LLM. Gli altri vengono scartati senza ritentare.
+
+### Deduplicazione intra-batch
+
+Piu' cluster nello stesso batch possono condividere lo stesso `mention_identifier`. La deduplicazione e' gestita da una cache URL locale al batch: il primo cluster che risolve un URL esegue fetch e chiamata LLM; i successivi che condividono lo stesso URL ricevono il risultato dalla cache senza ulteriori chiamate. Le failure vengono cacheate allo stesso modo, cosi' URL gia' noti come non raggiungibili vengono saltati immediatamente.
+
+### Microservizio Ollama
+
+La chiamata LLM non avviene dentro il processo principale. Esiste un microservizio separato (`enrichment_service`) che gira localmente su porta 8001 e funge da adapter verso Ollama. Il main app lo chiama via `POST /enrich` con il contenuto estratto dall'articolo; il microservizio costruisce il prompt, chiama Ollama, valida la risposta JSON contro lo schema atteso e la restituisce.
+
+Questa separazione mantiene il main app indipendente dal modello locale: il microservizio puo' cambiare modello, prompt o provider LLM senza toccare il pipeline principale.
+
+Il sistema prompt e' orientato all'estrazione semantica giornalistica: istruisce il modello a produrre esclusivamente JSON valido con campi tipizzati, senza allucinare contenuto non presente nel testo sorgente.
+
+### Schema dei campi arricchiti
+
+I campi aggiunti a `story_clusters` e `root_clusters` sono:
+
+- `article_title`: titolo canonico estratto o corretto dall'LLM;
+- `article_summary`: sommario neutro in 2-4 frasi;
+- `cited_sources`: outlet, agenzie o pubblicazioni citate come fonte nel corpo dell'articolo;
+- `main_topics`: 3-8 categorie tematiche ad alto livello;
+- `keywords`: 5-15 termini specifici e distintivi dell'articolo;
+- `entities`: oggetto con 10 bucket (persone, organizzazioni, luoghi, etnie, religioni, occupazioni, affiliazioni politiche, industrie, prodotti, brand);
+- `enrichment_status`: stato della macchina a stati (`pending`, `processing`, `succeeded`, `failed`);
+- `enriched_at`: timestamp UTC dell'ultimo enrichment riuscito;
+- `enrichment_error`: messaggio dell'ultimo errore, per diagnostica.
+
+### Macchina a stati e idempotenza
+
+Ogni cluster nasce con `enrichment_status = pending`. Il pipeline di materializzazione non tocca questi campi: il ricalcolo del cluster su nuovi dati non azzera un enrichment gia' completato. L'upsert su `cluster_id` aggiorna solo le colonne presenti nel dict del pipeline; le colonne LLM vengono modificate esclusivamente dal job di enrichment.
+
+Il job schedulato (`CLUSTER_ENRICHMENT_INTERVAL_MINUTES`, default 30 min) processa un batch configurabile di cluster pending (`CLUSTER_ENRICHMENT_BATCH_SIZE`, default 20) per `story_clusters` e poi per `root_clusters`, con sessioni DB separate. E' disponibile anche un trigger manuale via `POST /enrich/trigger` protetto da API key e cooldown di 1 minuto.
