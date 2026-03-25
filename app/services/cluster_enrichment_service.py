@@ -12,7 +12,7 @@ Architecture (per paper.md):
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import select, update
@@ -30,6 +30,9 @@ logger = get_logger(__name__)
 
 EnrichedPayload = dict[str, Any]
 UrlCache = dict[str, Any]
+
+_URL_MAX_RETRIES = 2
+_STALE_PROCESSING_MINUTES = 15
 
 
 # ── Public entry-point ────────────────────────────────────────────────────────
@@ -50,12 +53,15 @@ async def run_cluster_enrichment_batch(
     """
     model = StoryCluster if table == "story" else RootCluster
 
+    recovered = await _reset_stale_processing(session, model)
+    if recovered:
+        logger.info("cluster_enrichment_stale_reset", table=table, recovered=recovered)
+
     candidates = await _get_pending_candidates(session, model, limit=batch_size)
     candidate_rows = [
         {
             "cluster_id": c.cluster_id,
             "mention_identifiers": c.mention_identifiers or [],
-            "source_url": c.source_url,
         }
         for c in candidates
     ]
@@ -72,13 +78,7 @@ async def run_cluster_enrichment_batch(
 
     for i, row in enumerate(candidate_rows):
         cluster_id: str = row["cluster_id"]
-        mention_ids: list[str] = row["mention_identifiers"]
-        source_url: str = row["source_url"]
-
-        # mention_identifiers are the primary document unit; source_url is fallback.
-        urls_to_try: list[str] = list(mention_ids)
-        if source_url and source_url.strip() and source_url not in urls_to_try:
-            urls_to_try.append(source_url)
+        urls_to_try: list[str] = list(row["mention_identifiers"])
 
         logger.info(
             "cluster_enrichment_candidate",
@@ -132,6 +132,32 @@ async def run_cluster_enrichment_batch(
 
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
+
+
+async def _reset_stale_processing(
+    session: AsyncSession,
+    model: type[StoryCluster | RootCluster],
+) -> int:
+    """Reset clusters stuck in 'processing' back to 'pending'.
+
+    A cluster is considered stale when it has been in 'processing' for longer
+    than _STALE_PROCESSING_MINUTES — meaning the previous job was interrupted
+    before it could complete or record a failure.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=_STALE_PROCESSING_MINUTES)
+    result = await session.execute(
+        update(model)
+        .where(
+            model.enrichment_status == "processing",
+            model.enriched_at == None,  # noqa: E711 — SQLAlchemy requires == None
+            model.computed_at < cutoff,
+        )
+        .values(enrichment_status="pending", enrichment_error=None)
+        .returning(model.cluster_id)
+    )
+    await session.commit()
+    rows = result.fetchall()
+    return len(rows)
 
 
 async def _get_pending_candidates(
@@ -231,36 +257,47 @@ async def _enrich_from_url_list(urls: list[str], cache: UrlCache) -> EnrichedPay
             logger.info("cluster_enrichment_url_cache_hit", url=url)
             return cached
 
-        try:
-            logger.info("cluster_enrichment_fetching", url=url)
-            fetched = await fetch_article_html(url)
-            extracted = extract_article_payload(fetched["html"])
-            logger.info(
-                "cluster_enrichment_fetch_ok",
-                url=url,
-                content_length=len(extracted.get("content", "")),
-            )
+        attempt_exc: Exception | None = None
+        for attempt in range(1, _URL_MAX_RETRIES + 1):
+            try:
+                logger.info("cluster_enrichment_fetching", url=url, attempt=attempt)
+                fetched = await fetch_article_html(url)
+                extracted = extract_article_payload(fetched["html"])
+                logger.info(
+                    "cluster_enrichment_fetch_ok",
+                    url=url,
+                    content_length=len(extracted.get("content", "")),
+                )
 
-            logger.info("cluster_enrichment_calling_llm", url=url)
-            enriched = await enrich_article_content(extracted)
-            logger.info("cluster_enrichment_llm_ok", url=url)
+                logger.info("cluster_enrichment_calling_llm", url=url)
+                enriched = await enrich_article_content(extracted)
+                logger.info("cluster_enrichment_llm_ok", url=url)
 
-            payload: EnrichedPayload = {
-                "article_title": enriched.article_title,
-                "article_summary": enriched.article_summary,
-                "cited_sources": enriched.cited_sources,
-                "main_topics": enriched.main_topics,
-                "keywords": enriched.keywords,
-                "entities": enriched.entities.model_dump(),
-            }
-            cache[url] = payload
-            return payload
+                payload: EnrichedPayload = {
+                    "article_title": enriched.article_title,
+                    "article_summary": enriched.article_summary,
+                    "cited_sources": enriched.cited_sources,
+                    "main_topics": enriched.main_topics,
+                    "keywords": enriched.keywords,
+                    "entities": enriched.entities.model_dump(),
+                }
+                cache[url] = payload
+                return payload
 
-        except Exception as exc:
-            logger.warning("cluster_enrichment_url_failed", url=url, error=_stringify(exc))
-            cache[url] = exc
-            last_exc = exc
-            continue
+            except Exception as exc:
+                attempt_exc = exc
+                logger.warning(
+                    "cluster_enrichment_url_attempt_failed",
+                    url=url,
+                    attempt=attempt,
+                    max_retries=_URL_MAX_RETRIES,
+                    error=_stringify(exc),
+                )
+
+        logger.warning("cluster_enrichment_url_failed", url=url, error=_stringify(attempt_exc))
+        cache[url] = attempt_exc  # type: ignore[assignment]
+        last_exc = attempt_exc
+        continue
 
     raise last_exc or RuntimeError("all candidate URLs exhausted without a recorded error")
 
