@@ -17,6 +17,21 @@ _MAX_PG_ARGS = 32_767
 _ROOT_CLUSTER_COLUMNS = len(RootCluster.__table__.columns) - 1
 
 
+def _json_contains(q, column, value: str, table_name: str, col_name: str, bind_key: str, dialect: str):
+    """Return query with a JSON-array-contains filter applied (dialect-aware)."""
+    if dialect == "postgresql":
+        from sqlalchemy.dialects.postgresql import JSONB
+
+        return q.where(cast(column, JSONB).contains(cast([value], JSONB)))
+    # SQLite: correlated EXISTS over json_each
+    return q.where(
+        column.is_not(None),
+        text(
+            f"EXISTS (SELECT 1 FROM json_each({table_name}.{col_name}) WHERE value = :{bind_key})"
+        ).bindparams(**{bind_key: value}),
+    )
+
+
 class RootClusterRepository:
     """Data access layer for the root_clusters table."""
 
@@ -90,39 +105,81 @@ class RootClusterRepository:
         self,
         *,
         min_score: float | None = None,
+        min_event_count: int | None = None,
+        min_mentions: int | None = None,
         country_code: str | None = None,
+        date_from: int | None = None,
+        date_to: int | None = None,
+        mentioned_after: datetime | None = None,
+        mentioned_before: datetime | None = None,
+        enrichment_status: str | None = None,
+        event_type: str | None = None,
+        quad_class: str | None = None,
+        theme: str | None = None,
+        keyword: str | None = None,
+        topic: str | None = None,
         limit: int = _DEFAULT_LIMIT,
         offset: int = 0,
     ) -> tuple[list[RootCluster], int]:
-        """Return (clusters, total_count) matching the filters."""
+        """Return (clusters, total_count) matching the filters, ordered by topic_score DESC."""
         limit = max(1, min(limit, _MAX_LIMIT))
 
+        dialect_name = (
+            self._session.bind.dialect.name if self._session.bind is not None else "postgresql"
+        )
+
         q = select(RootCluster)
+
+        # ── Scalar filters ──────────────────────────────────────────────────
         if min_score is not None:
             q = q.where(RootCluster.topic_score >= min_score)
+        if min_event_count is not None:
+            q = q.where(RootCluster.event_count >= min_event_count)
+        if min_mentions is not None:
+            q = q.where(RootCluster.mention_count >= min_mentions)
+        if date_from is not None:
+            q = q.where(RootCluster.event_date_ref_start >= date_from)
+        if date_to is not None:
+            q = q.where(RootCluster.event_date_ref_end <= date_to)
+        if mentioned_after is not None:
+            q = q.where(RootCluster.first_mention_at >= mentioned_after)
+        if mentioned_before is not None:
+            q = q.where(RootCluster.last_mention_at <= mentioned_before)
+        if enrichment_status is not None:
+            q = q.where(RootCluster.enrichment_status == enrichment_status)
 
+        # ── JSON-array containment filters ──────────────────────────────────
+        _tbl = "root_clusters"
         if country_code is not None:
-            dialect_name = (
-                self._session.bind.dialect.name if self._session.bind is not None else "postgresql"
+            q = _json_contains(
+                q, RootCluster.dominant_countries, country_code,
+                _tbl, "dominant_countries", "cc", dialect_name,
             )
-            if dialect_name == "postgresql":
-                from sqlalchemy.dialects.postgresql import JSONB
-
-                q = q.where(
-                    cast(RootCluster.dominant_countries, JSONB).contains(
-                        cast([country_code], JSONB)
-                    )
-                )
-            else:
-                q = q.where(
-                    RootCluster.dominant_countries.is_not(None),
-                    text(
-                        "EXISTS ("
-                        "SELECT 1 FROM json_each(root_clusters.dominant_countries) "
-                        "WHERE value = :cc"
-                        ")"
-                    ).bindparams(cc=country_code),
-                )
+        if event_type is not None:
+            q = _json_contains(
+                q, RootCluster.dominant_event_types, event_type,
+                _tbl, "dominant_event_types", "et", dialect_name,
+            )
+        if quad_class is not None:
+            q = _json_contains(
+                q, RootCluster.dominant_quad_classes, quad_class,
+                _tbl, "dominant_quad_classes", "qc", dialect_name,
+            )
+        if theme is not None:
+            q = _json_contains(
+                q, RootCluster.themes, theme,
+                _tbl, "themes", "th", dialect_name,
+            )
+        if keyword is not None:
+            q = _json_contains(
+                q, RootCluster.keywords, keyword,
+                _tbl, "keywords", "kw", dialect_name,
+            )
+        if topic is not None:
+            q = _json_contains(
+                q, RootCluster.main_topics, topic,
+                _tbl, "main_topics", "tp", dialect_name,
+            )
 
         count_q = select(func.count()).select_from(q.with_only_columns(RootCluster.id).subquery())
         total_result = await self._session.execute(count_q)

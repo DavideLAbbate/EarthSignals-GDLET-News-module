@@ -23,6 +23,21 @@ _MAX_PG_ARGS = 32_767
 _CLUSTER_COLUMNS = len(StoryCluster.__table__.columns) - 1
 
 
+def _json_contains(q, column, value: str, table_name: str, col_name: str, bind_key: str, dialect: str):
+    """Return query with a JSON-array-contains filter applied (dialect-aware)."""
+    if dialect == "postgresql":
+        from sqlalchemy.dialects.postgresql import JSONB
+
+        return q.where(cast(column, JSONB).contains(cast([value], JSONB)))
+    # SQLite: correlated EXISTS over json_each
+    return q.where(
+        column.is_not(None),
+        text(
+            f"EXISTS (SELECT 1 FROM json_each({table_name}.{col_name}) WHERE value = :{bind_key})"
+        ).bindparams(**{bind_key: value}),
+    )
+
+
 class ClusterRepository:
     """Data access layer for the story_clusters table."""
 
@@ -127,44 +142,86 @@ class ClusterRepository:
         self,
         *,
         min_score: float | None = None,
+        min_event_count: int | None = None,
+        min_mentions: int | None = None,
         country_code: str | None = None,
+        date_from: int | None = None,
+        date_to: int | None = None,
+        mentioned_after: datetime | None = None,
+        mentioned_before: datetime | None = None,
+        enrichment_status: str | None = None,
+        event_type: str | None = None,
+        quad_class: str | None = None,
+        theme: str | None = None,
+        keyword: str | None = None,
+        topic: str | None = None,
         limit: int = _DEFAULT_LIMIT,
         offset: int = 0,
     ) -> tuple[list[StoryCluster], int]:
         """Return (clusters, total_count) matching the filters, ordered by topic_score DESC.
 
-        The country_code filter is pushed to SQL on both dialects:
-        - PostgreSQL: JSONB containment operator ``@>`` — uses the GIN index on
-          ``dominant_countries`` created by migration 010.
-        - SQLite (tests): correlated EXISTS over ``json_each(dominant_countries)``.
+        Supports filtering on all significant table columns:
+        - Scalar comparisons: min_score, min_event_count, min_mentions, date_from, date_to,
+          enrichment_status
+        - JSON-array containment (dialect-aware): country_code, event_type, quad_class,
+          theme, keyword, topic
         """
+        dialect_name = (
+            self._session.bind.dialect.name if self._session.bind is not None else "postgresql"
+        )
+
         q = select(StoryCluster)
+
+        # ── Scalar filters ──────────────────────────────────────────────────
         if min_score is not None:
             q = q.where(StoryCluster.topic_score >= min_score)
+        if min_event_count is not None:
+            q = q.where(StoryCluster.event_count >= min_event_count)
+        if min_mentions is not None:
+            q = q.where(StoryCluster.mention_count >= min_mentions)
+        if date_from is not None:
+            q = q.where(StoryCluster.event_date_ref_start >= date_from)
+        if date_to is not None:
+            q = q.where(StoryCluster.event_date_ref_end <= date_to)
+        if mentioned_after is not None:
+            q = q.where(StoryCluster.first_mention_at >= mentioned_after)
+        if mentioned_before is not None:
+            q = q.where(StoryCluster.last_mention_at <= mentioned_before)
+        if enrichment_status is not None:
+            q = q.where(StoryCluster.enrichment_status == enrichment_status)
 
+        # ── JSON-array containment filters ──────────────────────────────────
+        _tbl = "story_clusters"
         if country_code is not None:
-            dialect_name = (
-                self._session.bind.dialect.name if self._session.bind is not None else "postgresql"
+            q = _json_contains(
+                q, StoryCluster.dominant_countries, country_code,
+                _tbl, "dominant_countries", "cc", dialect_name,
             )
-            if dialect_name == "postgresql":
-                from sqlalchemy.dialects.postgresql import JSONB
-
-                q = q.where(
-                    cast(StoryCluster.dominant_countries, JSONB).contains(
-                        cast([country_code], JSONB)
-                    )
-                )
-            else:
-                # SQLite: EXISTS (SELECT 1 FROM json_each(dominant_countries) WHERE value = ?)
-                q = q.where(
-                    StoryCluster.dominant_countries.is_not(None),
-                    text(
-                        "EXISTS ("
-                        "SELECT 1 FROM json_each(story_clusters.dominant_countries) "
-                        "WHERE value = :cc"
-                        ")"
-                    ).bindparams(cc=country_code),
-                )
+        if event_type is not None:
+            q = _json_contains(
+                q, StoryCluster.dominant_event_types, event_type,
+                _tbl, "dominant_event_types", "et", dialect_name,
+            )
+        if quad_class is not None:
+            q = _json_contains(
+                q, StoryCluster.dominant_quad_classes, quad_class,
+                _tbl, "dominant_quad_classes", "qc", dialect_name,
+            )
+        if theme is not None:
+            q = _json_contains(
+                q, StoryCluster.themes, theme,
+                _tbl, "themes", "th", dialect_name,
+            )
+        if keyword is not None:
+            q = _json_contains(
+                q, StoryCluster.keywords, keyword,
+                _tbl, "keywords", "kw", dialect_name,
+            )
+        if topic is not None:
+            q = _json_contains(
+                q, StoryCluster.main_topics, topic,
+                _tbl, "main_topics", "tp", dialect_name,
+            )
 
         count_q = select(func.count()).select_from(q.with_only_columns(StoryCluster.id).subquery())
         total_result = await self._session.execute(count_q)
