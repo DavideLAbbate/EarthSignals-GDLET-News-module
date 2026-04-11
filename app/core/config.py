@@ -72,6 +72,17 @@ class Settings(BaseSettings):
     cluster_merge_max_themes_for_jaccard: int | None = Field(default=80, ge=1)
     cluster_max_merge_day_gap: int = Field(default=2, ge=0)
     cluster_merge_max_theme_df: float = Field(default=0.2, ge=0.0, le=1.0)
+    # GKG field caps — maximum number of values retained per cluster after
+    # frequency-weighted selection. Themes and locations cap at 20; persons
+    # and organisations cap at 30 to preserve richer entity coverage.
+    cluster_gkg_themes_cap: int = Field(default=20, ge=1)
+    cluster_gkg_persons_cap: int = Field(default=30, ge=1)
+    cluster_gkg_orgs_cap: int = Field(default=30, ge=1)
+    cluster_gkg_locations_cap: int = Field(default=20, ge=1)
+    # Maximum number of distinct articles (from different domains) to fetch and
+    # combine before calling the LLM enrichment service. Higher values give the
+    # LLM more context but increase latency and token usage.
+    cluster_enrichment_max_articles: int = Field(default=3, ge=1, le=10)
 
     # URL path segments that identify section/archive pages rather than individual
     # articles. Candidates whose URL path contains any of these segments are excluded

@@ -467,21 +467,21 @@ class ClusterService:
         ]
 
         mention_sources = sorted({m.mention_source_name for m in mentions if m.mention_source_name})
-        mention_identifiers = sorted(
-            {m.mention_identifier for m in mentions if m.mention_identifier}
+        _url_counts: Counter[str] = Counter(
+            m.mention_identifier for m in mentions if m.mention_identifier
         )
+        mention_identifiers = sorted(_url_counts, key=lambda u: (-_url_counts[u], u))
         mention_times = [
             _parse_gdelt_timestamp(m.mention_time_date)
             for m in mentions
             if m.mention_time_date is not None
         ]
 
-        themes = _sorted_unique(item for row in gkg_rows for item in (row.themes or []))
-        persons = _sorted_unique(item for row in gkg_rows for item in (row.persons or []))
-        organizations = _sorted_unique(
-            item for row in gkg_rows for item in (row.organizations or [])
-        )
-        gkg_locations = _sorted_unique(item for row in gkg_rows for item in (row.locations or []))
+        _cfg = get_settings()
+        themes = _top_gkg_values(gkg_rows, "themes", cap=_cfg.cluster_gkg_themes_cap)
+        persons = _top_gkg_values(gkg_rows, "persons", cap=_cfg.cluster_gkg_persons_cap)
+        organizations = _top_gkg_values(gkg_rows, "organizations", cap=_cfg.cluster_gkg_orgs_cap)
+        gkg_locations = _top_gkg_values(gkg_rows, "locations", cap=_cfg.cluster_gkg_locations_cap)
         tones = [row.document_tone for row in gkg_rows if row.document_tone is not None]
 
         return {
@@ -901,12 +901,18 @@ class ClusterService:
         result = await self._session.execute(
             select(ClusterComponent).where(ClusterComponent.status == "active")
         )
+        healed = 0
         for component in result.scalars().all():
             if not component.current_cluster_id or not component.current_table:
-                raise ClusterBuildError(
-                    "Materialized cluster consistency check failed",
-                    detail=f"active component missing soft link: {component.component_id}",
+                logger.warning(
+                    "cluster_consistency_heal_missing_link",
+                    component_id=component.component_id,
                 )
+                await self._cluster_component_repo.mark_stale(
+                    component.component_id, component.missing_run_count or 0
+                )
+                healed += 1
+                continue
             if component.current_table == "story_clusters":
                 exists = await self._cluster_repo.exists_by_cluster_id(component.current_cluster_id)
             elif component.current_table == "root_clusters":
@@ -914,15 +920,29 @@ class ClusterService:
                     component.current_cluster_id
                 )
             else:
-                raise ClusterBuildError(
-                    "Materialized cluster consistency check failed",
-                    detail=f"active component points to unknown table: {component.component_id}",
+                logger.warning(
+                    "cluster_consistency_heal_unknown_table",
+                    component_id=component.component_id,
+                    table=component.current_table,
                 )
+                await self._cluster_component_repo.mark_stale(
+                    component.component_id, component.missing_run_count or 0
+                )
+                healed += 1
+                continue
             if not exists:
-                raise ClusterBuildError(
-                    "Materialized cluster consistency check failed",
-                    detail=f"active component points to missing cluster row: {component.component_id}",
+                logger.warning(
+                    "cluster_consistency_heal_missing_cluster",
+                    component_id=component.component_id,
+                    current_cluster_id=component.current_cluster_id,
+                    table=component.current_table,
                 )
+                await self._cluster_component_repo.mark_stale(
+                    component.component_id, component.missing_run_count or 0
+                )
+                healed += 1
+        if healed:
+            logger.info("cluster_consistency_healed_stale_components", count=healed)
 
     async def build_and_materialise(
         self,
@@ -1069,6 +1089,10 @@ class ClusterService:
                 max_themes_for_jaccard=get_settings().cluster_merge_max_themes_for_jaccard,
                 max_merge_day_gap=get_settings().cluster_max_merge_day_gap,
                 max_theme_df=get_settings().cluster_merge_max_theme_df,
+                gkg_themes_cap=get_settings().cluster_gkg_themes_cap,
+                gkg_persons_cap=get_settings().cluster_gkg_persons_cap,
+                gkg_orgs_cap=get_settings().cluster_gkg_orgs_cap,
+                gkg_locations_cap=get_settings().cluster_gkg_locations_cap,
             )
             cluster_rows = merger.merge(cluster_rows)
             t_merge = time.monotonic()
@@ -1157,6 +1181,23 @@ def _top_values(values: list[str], limit: int = 5) -> list[str]:
 def _sorted_unique(values: Any) -> list[str]:
     """Return sorted unique string values from an iterable."""
     return sorted({value for value in values if value})
+
+
+def _top_gkg_values(gkg_rows: list[Any], field: str, cap: int) -> list[str]:
+    """Return the most document-frequent non-empty values for a GKG field, capped at `cap`.
+
+    Each GKG document contributes its values once, so a value appearing in 8 of
+    10 documents scores higher than one appearing in only 2. Ties are broken
+    alphabetically for deterministic output.
+    """
+    counts: Counter[str] = Counter(
+        item
+        for row in gkg_rows
+        for item in (getattr(row, field) or [])
+        if item
+    )
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return [v for v, _ in ranked[:cap]]
 
 
 def _normalize_since_date_added(value: datetime | int) -> int:

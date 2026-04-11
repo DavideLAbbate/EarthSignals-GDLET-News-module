@@ -60,12 +60,15 @@ def _yyyymmdd_to_date(value: int) -> date:
 
 _LIST_FIELDS = (
     "mention_identifiers",
+    "event_ids",
+    "distinct_mention_sources",
+)
+
+_GKG_LIST_FIELDS = (
     "themes",
     "persons",
     "organizations",
     "gkg_locations",
-    "event_ids",
-    "distinct_mention_sources",
 )
 
 _SUM_INT_FIELDS = (
@@ -111,6 +114,10 @@ class ClusterMerger:
         max_themes_for_jaccard: int | None = 80,
         max_merge_day_gap: int = 2,
         max_theme_df: float = 0.2,
+        gkg_themes_cap: int = 20,
+        gkg_persons_cap: int = 30,
+        gkg_orgs_cap: int = 30,
+        gkg_locations_cap: int = 20,
     ) -> None:
         self._mention_overlap_min = mention_overlap_min
         self._jaccard_threshold = jaccard_threshold
@@ -122,6 +129,12 @@ class ClusterMerger:
         # would generate O(n²) candidate pairs on its own, defeating the index.
         self._max_theme_df = max_theme_df
         self._max_merge_evidence_items = 5
+        self._gkg_caps = {
+            "themes": gkg_themes_cap,
+            "persons": gkg_persons_cap,
+            "organizations": gkg_orgs_cap,
+            "gkg_locations": gkg_locations_cap,
+        }
 
     def merge(self, clusters: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Merge related clusters into fused representations.
@@ -392,6 +405,10 @@ class ClusterMerger:
         for field in _LIST_FIELDS:
             fused[field] = _sorted_unique_union(group, field)
 
+        # GKG list fields — frequency-ranked union capped to configured limits
+        for field in _GKG_LIST_FIELDS:
+            fused[field] = _frequency_capped_union(group, field, self._gkg_caps[field])
+
         fused["cluster_id"] = _cluster_id_from_event_ids(fused["event_ids"])
 
         # Summed integer fields (events don't overlap between source URLs)
@@ -480,6 +497,21 @@ class ClusterMerger:
 def _sorted_unique_union(group: list[dict[str, Any]], field: str) -> list[str]:
     """Return sorted unique union of a list field across all clusters in a group."""
     return sorted({v for c in group for v in (c.get(field) or []) if v})
+
+
+def _frequency_capped_union(
+    group: list[dict[str, Any]], field: str, cap: int
+) -> list[str]:
+    """Union a GKG list field across clusters, rank by cross-cluster occurrence count, cap.
+
+    Each value is counted once per sub-cluster that contains it (not per document),
+    approximating document-frequency consensus across the merged group.
+    """
+    counts: Counter[str] = Counter(
+        v for c in group for v in (c.get(field) or []) if v
+    )
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return [v for v, _ in ranked[:cap]]
 
 
 def _mean_of_non_none(group: list[dict[str, Any]], field: str) -> float | None:

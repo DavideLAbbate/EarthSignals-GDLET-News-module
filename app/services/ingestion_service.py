@@ -258,18 +258,38 @@ async def run_incremental(session: AsyncSession) -> dict[str, Any]:
 
 
 async def run_retention_cleanup(session: AsyncSession) -> dict[str, Any]:
-    """Delete events older than retention_days from local storage."""
+    """Delete events, mentions, and GKG rows older than retention_days from local storage."""
     settings = get_settings()
     logger.info("starting_retention_cleanup", retention_days=settings.retention_days)
 
     cutoff_date = datetime.now(timezone.utc) - timedelta(days=settings.retention_days)
     cutoff_sqldate = int(cutoff_date.strftime("%Y%m%d"))
+    cutoff_dateadded = int(cutoff_date.strftime("%Y%m%d%H%M%S"))
 
-    deleted = await event_repository.delete_events_before(session, cutoff_sqldate)
+    deleted_events = await event_repository.delete_events_before(session, cutoff_sqldate)
     await session.commit()
 
-    logger.info("retention_cleanup_completed", deleted=deleted, cutoff_sqldate=cutoff_sqldate)
-    return {"deleted": deleted, "cutoff_sqldate": cutoff_sqldate}
+    mentions_repo = MentionsRepository(session)
+    deleted_mentions = await mentions_repo.delete_before_dateadded(cutoff_dateadded)
+    await session.commit()
+
+    gkg_repo = GkgRepository(session)
+    deleted_gkg = await gkg_repo.delete_before_date(cutoff_dateadded)
+    await session.commit()
+
+    logger.info(
+        "retention_cleanup_completed",
+        deleted_events=deleted_events,
+        deleted_mentions=deleted_mentions,
+        deleted_gkg=deleted_gkg,
+        cutoff_sqldate=cutoff_sqldate,
+    )
+    return {
+        "deleted_events": deleted_events,
+        "deleted_mentions": deleted_mentions,
+        "deleted_gkg": deleted_gkg,
+        "cutoff_sqldate": cutoff_sqldate,
+    }
 
 
 async def should_bootstrap_on_startup(session: AsyncSession) -> bool:
@@ -277,6 +297,29 @@ async def should_bootstrap_on_startup(session: AsyncSession) -> bool:
     if await event_repository.get_event_count(session) > 0:
         return False
     return not await ingestion_repository.is_bootstrap_complete(session)
+
+
+async def should_catchup_on_startup(session: AsyncSession) -> bool:
+    """Return True when the last watermark is far enough behind now to warrant an immediate
+    incremental catch-up run on startup rather than waiting for the first scheduled tick.
+
+    Threshold is 4 hours — large enough to skip normal restarts but catches multi-day gaps
+    that occur when the service has been offline for an extended period.
+    """
+    last = await ingestion_repository.get_latest_successful_ingestion(
+        session, ingestion_repository.IngestionType.INCREMENTAL
+    )
+    if last is None:
+        last = await ingestion_repository.get_latest_successful_ingestion(
+            session, ingestion_repository.IngestionType.BOOTSTRAP
+        )
+    if last is None or last.watermark_dateadded is None:
+        return False
+    watermark_dt = datetime.strptime(str(last.watermark_dateadded), "%Y%m%d%H%M%S").replace(
+        tzinfo=timezone.utc
+    )
+    gap = datetime.now(timezone.utc) - watermark_dt
+    return gap.total_seconds() > 4 * 3600
 
 
 def _row_to_event_dict(row: dict[str, Any]) -> dict[str, Any]:

@@ -871,28 +871,65 @@ async def test_run_incremental_rolls_back_before_marking_failed(mock_gdelt_clien
 
 @pytest.mark.asyncio
 async def test_run_retention_cleanup(db_session):
-    """Retention cleanup deletes events older than retention_days."""
+    """Retention cleanup deletes events, mentions, and GKG rows older than retention_days."""
     from app.db.repositories import event_repository
+    from app.db.repositories.gkg_repository import GkgRepository
+    from app.db.repositories.mentions_repository import MentionsRepository
     from app.services import ingestion_service
+
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    old_sqldate = int((now - timedelta(days=60)).strftime("%Y%m%d"))
+    old_dateadded = int((now - timedelta(days=60)).strftime("%Y%m%d%H%M%S"))
+    recent_sqldate = int((now - timedelta(days=5)).strftime("%Y%m%d"))
+    recent_dateadded = int((now - timedelta(days=5)).strftime("%Y%m%d%H%M%S"))
 
     old_events = [
         {
             "global_event_id": 1234567890123,
-            "sql_date": 20250101,
-            "date_added": 20250101000000,
+            "sql_date": old_sqldate,
+            "date_added": old_dateadded,
             "actor1_country_code": "USA",
             "source_url": "https://example.com/old",
         },
         {
             "global_event_id": 1234567890124,
-            "sql_date": 20260301,
-            "date_added": 20260301000000,
+            "sql_date": recent_sqldate,
+            "date_added": recent_dateadded,
             "actor1_country_code": "USA",
             "source_url": "https://example.com/recent",
         },
     ]
-
     await event_repository.bulk_insert_events(db_session, old_events)
+    await db_session.commit()
+
+    mentions_repo = MentionsRepository(db_session)
+    await mentions_repo.bulk_upsert([
+        {
+            "global_event_id": 1234567890123,
+            "event_time_date": old_dateadded,
+            "mention_time_date": old_dateadded,
+            "mention_type": 1,
+            "mention_source_name": "old-source",
+            "mention_identifier": "https://example.com/old-article",
+        },
+        {
+            "global_event_id": 1234567890124,
+            "event_time_date": recent_dateadded,
+            "mention_time_date": recent_dateadded,
+            "mention_type": 1,
+            "mention_source_name": "recent-source",
+            "mention_identifier": "https://example.com/recent-article",
+        },
+    ])
+    await db_session.commit()
+
+    gkg_repo = GkgRepository(db_session)
+    await gkg_repo.bulk_upsert([
+        {"document_identifier": "https://example.com/old-article", "date": old_dateadded, "themes": []},
+        {"document_identifier": "https://example.com/recent-article", "date": recent_dateadded, "themes": []},
+    ])
     await db_session.commit()
 
     with patch.object(ingestion_service, "get_settings") as mock_settings:
@@ -900,10 +937,63 @@ async def test_run_retention_cleanup(db_session):
 
         result = await ingestion_service.run_retention_cleanup(db_session)
 
-    assert result["deleted"] == 1
+    assert result["deleted_events"] == 1
+    assert result["deleted_mentions"] == 1
+    assert result["deleted_gkg"] == 1
 
-    count = await event_repository.get_event_count(db_session)
-    assert count == 1
+    assert await event_repository.get_event_count(db_session) == 1
+
+
+@pytest.mark.asyncio
+async def test_should_catchup_on_startup_when_watermark_is_stale(db_session):
+    """should_catchup_on_startup returns True when the last watermark is > 4 hours old."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.db.repositories import ingestion_repository
+    from app.services import ingestion_service
+
+    stale_watermark = int(
+        (datetime.now(timezone.utc) - timedelta(hours=10)).strftime("%Y%m%d%H%M%S")
+    )
+    run = await ingestion_repository.create_ingestion_run(
+        db_session, ingestion_repository.IngestionType.INCREMENTAL
+    )
+    await ingestion_repository.update_ingestion_run(
+        db_session,
+        run.id,
+        ingestion_repository.IngestionStatus.COMPLETED,
+        watermark_dateadded=stale_watermark,
+        events_ingested=100,
+    )
+    await db_session.commit()
+
+    assert await ingestion_service.should_catchup_on_startup(db_session) is True
+
+
+@pytest.mark.asyncio
+async def test_should_not_catchup_on_startup_when_watermark_is_fresh(db_session):
+    """should_catchup_on_startup returns False when the last watermark is recent."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.db.repositories import ingestion_repository
+    from app.services import ingestion_service
+
+    fresh_watermark = int(
+        (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y%m%d%H%M%S")
+    )
+    run = await ingestion_repository.create_ingestion_run(
+        db_session, ingestion_repository.IngestionType.INCREMENTAL
+    )
+    await ingestion_repository.update_ingestion_run(
+        db_session,
+        run.id,
+        ingestion_repository.IngestionStatus.COMPLETED,
+        watermark_dateadded=fresh_watermark,
+        events_ingested=100,
+    )
+    await db_session.commit()
+
+    assert await ingestion_service.should_catchup_on_startup(db_session) is False
 
 
 @pytest.mark.asyncio

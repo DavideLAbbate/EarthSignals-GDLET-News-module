@@ -29,6 +29,7 @@ from app.services.ingestion_service import (
     run_bootstrap,
     run_incremental,
     should_bootstrap_on_startup,
+    should_catchup_on_startup,
 )
 
 logger = get_logger(__name__)
@@ -189,16 +190,21 @@ async def trigger_sync_now() -> None:
 
 
 async def trigger_startup_ingestion_if_needed() -> None:
-    """Run the initial bootstrap ingestion once when local event storage is empty."""
+    """Run bootstrap on first start, or an immediate catch-up if the watermark is stale."""
     session_factory = _get_session_factory()
 
     async with session_factory() as session:
-        if not await should_bootstrap_on_startup(session):
-            logger.info("startup_bootstrap_skipped")
+        if await should_bootstrap_on_startup(session):
+            logger.info("startup_bootstrap_triggered")
+            await run_bootstrap(session)
             return
 
-        logger.info("startup_bootstrap_triggered")
-        await run_bootstrap(session)
+        if await should_catchup_on_startup(session):
+            logger.info("startup_catchup_triggered")
+            await run_incremental(session)
+            return
+
+        logger.info("startup_ingestion_skipped")
 
 
 async def trigger_cluster_job_on_startup() -> None:

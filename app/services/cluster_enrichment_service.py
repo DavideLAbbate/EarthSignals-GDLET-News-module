@@ -14,10 +14,12 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import urlparse
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.db.models import RootCluster, StoryCluster
 from app.integrations.article_extractor import extract_article_content as extract_article_payload
@@ -105,7 +107,9 @@ async def run_cluster_enrichment_batch(
                 summary["skipped"] += 1
                 continue
 
-            payload = await _enrich_from_url_list(urls_to_try, url_cache)
+            payload = await _enrich_from_url_list(
+                urls_to_try, url_cache, max_articles=get_settings().cluster_enrichment_max_articles
+            )
 
             await _mark_succeeded(session, model, cluster_id, payload)
             summary["enriched"] += 1
@@ -240,24 +244,38 @@ async def _mark_failed(
 # ── Enrichment logic ──────────────────────────────────────────────────────────
 
 
-async def _enrich_from_url_list(urls: list[str], cache: UrlCache) -> EnrichedPayload:
-    """Try each URL in order, returning the first successful enrichment result.
+async def _enrich_from_url_list(
+    urls: list[str], cache: UrlCache, max_articles: int = 3
+) -> EnrichedPayload:
+    """Fetch up to max_articles diverse articles and enrich their combined content.
 
-    Both successes and failures are stored in cache to avoid redundant work
-    within the same batch.
+    URLs are expected to be pre-ranked by corroboration frequency (most-mentioned
+    first). At most one article per unique domain is collected to ensure source
+    diversity. All successfully fetched extracted payloads are cached per-URL to
+    avoid redundant HTTP requests within the same batch.
     """
+    collected: list[dict[str, str]] = []
+    seen_domains: set[str] = set()
     last_exc: Exception | None = None
 
     for url in urls:
+        if len(collected) >= max_articles:
+            break
+
+        domain = urlparse(url).netloc
+        if domain in seen_domains:
+            continue
+
         cached = cache.get(url)
         if isinstance(cached, Exception):
             last_exc = cached
             continue
-        if cached is not None:
+        if isinstance(cached, dict) and "content" in cached:
             logger.info("cluster_enrichment_url_cache_hit", url=url)
-            return cached
+            collected.append(cached)
+            seen_domains.add(domain)
+            continue
 
-        attempt_exc: Exception | None = None
         for attempt in range(1, _URL_MAX_RETRIES + 1):
             try:
                 logger.info("cluster_enrichment_fetching", url=url, attempt=attempt)
@@ -268,24 +286,12 @@ async def _enrich_from_url_list(urls: list[str], cache: UrlCache) -> EnrichedPay
                     url=url,
                     content_length=len(extracted.get("content", "")),
                 )
-
-                logger.info("cluster_enrichment_calling_llm", url=url)
-                enriched = await enrich_article_content(extracted)
-                logger.info("cluster_enrichment_llm_ok", url=url)
-
-                payload: EnrichedPayload = {
-                    "article_title": enriched.article_title,
-                    "article_summary": enriched.article_summary,
-                    "cited_sources": enriched.cited_sources,
-                    "main_topics": enriched.main_topics,
-                    "keywords": enriched.keywords,
-                    "entities": enriched.entities.model_dump(),
-                }
-                cache[url] = payload
-                return payload
-
+                cache[url] = extracted
+                collected.append(extracted)
+                seen_domains.add(domain)
+                break
             except Exception as exc:
-                attempt_exc = exc
+                last_exc = exc
                 logger.warning(
                     "cluster_enrichment_url_attempt_failed",
                     url=url,
@@ -293,13 +299,32 @@ async def _enrich_from_url_list(urls: list[str], cache: UrlCache) -> EnrichedPay
                     max_retries=_URL_MAX_RETRIES,
                     error=_stringify(exc),
                 )
+        else:
+            cache[url] = last_exc  # type: ignore[assignment]
+            logger.warning("cluster_enrichment_url_failed", url=url, error=_stringify(last_exc))
 
-        logger.warning("cluster_enrichment_url_failed", url=url, error=_stringify(attempt_exc))
-        cache[url] = attempt_exc  # type: ignore[assignment]
-        last_exc = attempt_exc
-        continue
+    if not collected:
+        raise last_exc or RuntimeError("all candidate URLs exhausted without a recorded error")
 
-    raise last_exc or RuntimeError("all candidate URLs exhausted without a recorded error")
+    combined_title = collected[0].get("title") or ""
+    combined_content = "\n\n---\n\n".join(a["content"] for a in collected if a.get("content"))
+
+    logger.info(
+        "cluster_enrichment_calling_llm",
+        articles_combined=len(collected),
+        domains=sorted(seen_domains),
+    )
+    enriched = await enrich_article_content({"title": combined_title, "content": combined_content})
+    logger.info("cluster_enrichment_llm_ok", articles_combined=len(collected))
+
+    return {
+        "article_title": enriched.article_title,
+        "article_summary": enriched.article_summary,
+        "cited_sources": enriched.cited_sources,
+        "main_topics": enriched.main_topics,
+        "keywords": enriched.keywords,
+        "entities": enriched.entities.model_dump(),
+    }
 
 
 def _stringify(exc: Exception) -> str:
