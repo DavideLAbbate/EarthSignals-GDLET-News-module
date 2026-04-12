@@ -182,7 +182,7 @@ class ClusterRepository:
         if date_from is not None:
             q = q.where(StoryCluster.event_date_ref_start >= date_from)
         if date_to is not None:
-            q = q.where(StoryCluster.event_date_ref_end <= date_to)
+            q = q.where(StoryCluster.event_date_ref_start <= date_to)
         if mentioned_after is not None:
             q = q.where(StoryCluster.first_mention_at >= mentioned_after)
         if mentioned_before is not None:

@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.api.dependencies import verify_api_key
 from app.core.logging import get_logger
@@ -25,12 +26,22 @@ _COOLDOWN_MINUTES = 1  # enrichment is slow; prevent accidental hammering
     "/enrich/trigger",
     summary="Manually trigger an enrichment batch",
     description=(
-        "Immediately runs one enrichment batch (up to EVENT_ENRICHMENT_BATCH_SIZE events) "
-        "outside the configured schedule. Subject to a 1-minute cooldown."
+        "Immediately runs one enrichment batch (up to CLUSTER_ENRICHMENT_BATCH_SIZE clusters) "
+        "outside the configured schedule. Subject to a 1-minute cooldown.\n\n"
+        "Use `date_from` / `date_to` (YYYYMMDD integers) to restrict enrichment to clusters "
+        "whose `event_date_ref_start` falls within that range."
     ),
     tags=["Enrichment"],
 )
 async def manual_enrich_trigger(
+    date_from: Annotated[
+        int | None,
+        Query(description="Earliest event date (YYYYMMDD). Only enrich clusters on or after this date.", example=20260313),
+    ] = None,
+    date_to: Annotated[
+        int | None,
+        Query(description="Latest event date (YYYYMMDD). Only enrich clusters on or before this date.", example=20260313),
+    ] = None,
     _: str = Depends(verify_api_key),
 ) -> dict:
     global _last_manual_trigger
@@ -51,11 +62,13 @@ async def manual_enrich_trigger(
             )
 
     _last_manual_trigger = datetime.now(timezone.utc)
-    logger.info("manual_enrichment_trigger_accepted")
+    logger.info("manual_enrichment_trigger_accepted", date_from=date_from, date_to=date_to)
 
-    asyncio.create_task(trigger_enrichment_now())
+    asyncio.create_task(trigger_enrichment_now(date_from=date_from, date_to=date_to))
 
     return {
         "status": "enrichment_triggered",
         "message": "Enrichment batch started in background. Check Docker logs for results.",
+        "date_from": date_from,
+        "date_to": date_to,
     }

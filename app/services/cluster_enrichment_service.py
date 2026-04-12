@@ -45,6 +45,8 @@ async def run_cluster_enrichment_batch(
     *,
     batch_size: int,
     table: str = "story",
+    date_from: int | None = None,
+    date_to: int | None = None,
 ) -> dict[str, int]:
     """Enrich a batch of pending clusters using their mention_identifiers.
 
@@ -52,6 +54,8 @@ async def run_cluster_enrichment_batch(
         session:    Active async DB session.
         batch_size: Maximum number of clusters to process per call.
         table:      "story" targets story_clusters; "root" targets root_clusters.
+        date_from:  Optional YYYYMMDD filter on event_date_ref_start (inclusive).
+        date_to:    Optional YYYYMMDD filter on event_date_ref_start (inclusive).
     """
     model = StoryCluster if table == "story" else RootCluster
 
@@ -59,7 +63,9 @@ async def run_cluster_enrichment_batch(
     if recovered:
         logger.info("cluster_enrichment_stale_reset", table=table, recovered=recovered)
 
-    candidates = await _get_pending_candidates(session, model, limit=batch_size)
+    candidates = await _get_pending_candidates(
+        session, model, limit=batch_size, date_from=date_from, date_to=date_to
+    )
     candidate_rows = [
         {
             "cluster_id": c.cluster_id,
@@ -169,13 +175,16 @@ async def _get_pending_candidates(
     model: type[StoryCluster | RootCluster],
     *,
     limit: int,
+    date_from: int | None = None,
+    date_to: int | None = None,
 ) -> list[StoryCluster | RootCluster]:
-    result = await session.execute(
-        select(model)
-        .where(model.enrichment_status == "pending")
-        .order_by(model.computed_at.asc())
-        .limit(limit)
-    )
+    q = select(model).where(model.enrichment_status == "pending")
+    if date_from is not None:
+        q = q.where(model.event_date_ref_start >= date_from)
+    if date_to is not None:
+        q = q.where(model.event_date_ref_start <= date_to)
+    q = q.order_by(model.topic_score.desc().nulls_last()).limit(limit)
+    result = await session.execute(q)
     return list(result.scalars().all())
 
 
@@ -204,7 +213,7 @@ async def _mark_succeeded(
         update(model)
         .where(model.cluster_id == cluster_id)
         .values(
-            enrichment_status="succeeded",
+            enrichment_status="success",
             enrichment_error=None,
             enriched_at=datetime.now(timezone.utc),
             article_title=payload.get("article_title"),

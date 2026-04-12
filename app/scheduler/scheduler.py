@@ -171,11 +171,14 @@ def add_sync_job(scheduler: AsyncIOScheduler) -> None:
     logger.info("cluster_terminal_cleanup_job_registered", interval_hours=24)
 
 
-async def trigger_enrichment_now() -> dict[str, Any]:
+async def trigger_enrichment_now(
+    date_from: int | None = None,
+    date_to: int | None = None,
+) -> dict[str, Any]:
     """Trigger an immediate cluster enrichment batch. Used by POST /enrich/trigger."""
     session_factory = _get_session_factory()
-    logger.info("cluster_enrichment_triggered_manually")
-    return await run_cluster_enrichment_job(session_factory)
+    logger.info("cluster_enrichment_triggered_manually", date_from=date_from, date_to=date_to)
+    return await run_cluster_enrichment_job(session_factory, date_from=date_from, date_to=date_to)
 
 
 async def trigger_sync_now() -> None:
@@ -295,6 +298,8 @@ async def run_event_enrichment_job(
 
 async def run_cluster_enrichment_job(
     session_factory: async_sessionmaker[AsyncSession],
+    date_from: int | None = None,
+    date_to: int | None = None,
 ) -> dict[str, Any]:
     """Run one cluster enrichment batch (story + root) with fresh DB sessions."""
     settings = get_settings()
@@ -302,12 +307,12 @@ async def run_cluster_enrichment_job(
 
     async with session_factory() as session:
         story_result = await run_cluster_enrichment_batch(
-            session, batch_size=batch_size, table="story"
+            session, batch_size=batch_size, table="story", date_from=date_from, date_to=date_to
         )
 
     async with session_factory() as session:
         root_result = await run_cluster_enrichment_batch(
-            session, batch_size=batch_size, table="root"
+            session, batch_size=batch_size, table="root", date_from=date_from, date_to=date_to
         )
 
     return {"story": story_result, "root": root_result}

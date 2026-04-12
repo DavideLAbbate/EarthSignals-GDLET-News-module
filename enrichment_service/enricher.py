@@ -12,10 +12,13 @@ import asyncio
 import json
 import re
 
+import structlog
 import httpx
 
 from enrichment_service.config import Settings
 from enrichment_service.schemas import EnrichResponse
+
+logger = structlog.get_logger(__name__)
 
 # ── Custom exception ───────────────────────────────────────────────────────────
 
@@ -233,10 +236,20 @@ async def call_ollama_enrich(
     timeout = settings.ollama_timeout_seconds
     max_retries = settings.ollama_max_retries
 
+    content_len = len(extracted_content)
+    logger.info(
+        "ollama_enrich_start",
+        model=settings.ollama_model,
+        title=extracted_title,
+        content_chars=content_len,
+        max_retries=max_retries,
+    )
+
     last_error: BaseException | None = None
     for attempt in range(max_retries + 1):
         if attempt > 0:
             backoff = 2.0 ** (attempt - 1)  # 1s, 2s, 4s …
+            logger.info("ollama_enrich_retry", attempt=attempt, backoff_s=backoff)
             await asyncio.sleep(backoff)
 
         try:
