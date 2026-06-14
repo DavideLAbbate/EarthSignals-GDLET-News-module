@@ -159,10 +159,15 @@ async def test_row_to_gkg_dict():
 @pytest.mark.asyncio
 async def test_run_bootstrap_success(mock_gdelt_client, db_session):
     """Bootstrap with one file containing one row records events_ingested == 1."""
+    from datetime import datetime, timedelta, timezone
+
     from app.services import ingestion_service
 
+    # File timestamp must fall inside the bootstrap window [now - retention_days, now],
+    # so derive it from "now" instead of hard-coding a date that eventually rots out.
+    recent_ts = int((datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y%m%d%H%M%S"))
     mock_gdelt_client.fetch_master_export_urls = AsyncMock(
-        return_value=[("https://fake/20260301000000.export.CSV.zip", 20260301000000)]
+        return_value=[(f"https://fake/{recent_ts}.export.CSV.zip", recent_ts)]
     )
     mock_gdelt_client.download_events = AsyncMock(return_value=[_make_gdelt_row()])
 

@@ -20,16 +20,22 @@ def _base_settings_overrides() -> dict[str, Any]:
 
 
 def test_settings_use_event_enrichment_defaults():
-    """Event enrichment settings should have the approved defaults."""
-    settings = Settings.model_validate(_base_settings_overrides())
+    """Event enrichment settings should declare the approved defaults.
 
-    assert settings.enable_event_enrichment is False
-    assert settings.event_enrichment_interval_minutes == 30
-    assert settings.event_enrichment_batch_size == 100
-    assert str(settings.event_enrichment_service_base_url) == "http://localhost:8001/"
-    assert settings.event_enrichment_service_timeout_seconds == 10.0
-    assert settings.enable_cluster_materialisation is True
-    assert settings.cluster_interval_minutes == 1440
+    Asserts the declared field defaults directly (via model_fields) so the test is
+    hermetic: it does not pick up a developer's local .env, which pydantic-settings
+    would otherwise layer on top of the defaults.
+    """
+    fields = Settings.model_fields
+    base_url_default = fields["event_enrichment_service_base_url"].default_factory()
+
+    assert fields["enable_event_enrichment"].default is False
+    assert fields["event_enrichment_interval_minutes"].default == 30
+    assert fields["event_enrichment_batch_size"].default == 100
+    assert str(base_url_default) == "http://localhost:8001/"
+    assert fields["event_enrichment_service_timeout_seconds"].default == 10.0
+    assert fields["enable_cluster_materialisation"].default is True
+    assert fields["cluster_interval_minutes"].default == 1440
 
 
 @pytest.mark.parametrize(

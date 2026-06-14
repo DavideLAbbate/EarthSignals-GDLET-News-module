@@ -6,6 +6,7 @@ Verifies that the job writes SyncState from local events and remains append-only
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 
@@ -16,29 +17,37 @@ from app.scheduler.sync_job import run_gdelt_sync
 
 async def test_sync_job_writes_sync_state(db_session):
     """Sync job writes metadata derived from local events to SyncState."""
+    # Use dates inside the sync job's rolling 30-day window so the test does not
+    # rot over time (events must be recent relative to "now", not hard-coded).
+    now = datetime.now(timezone.utc)
+    today = int(now.strftime("%Y%m%d"))
+    yesterday = int((now - timedelta(days=1)).strftime("%Y%m%d"))
+    today_added = int(now.strftime("%Y%m%d%H%M%S"))
+    yesterday_added = int((now - timedelta(days=1)).strftime("%Y%m%d%H%M%S"))
+
     await event_repository.bulk_insert_events(
         db_session,
         [
             {
                 "global_event_id": 1,
-                "sql_date": 20260307,
-                "date_added": 20260307120000,
+                "sql_date": today,
+                "date_added": today_added,
                 "action_geo_country_code": "US",
                 "event_root_code": "14",
                 "source_url": "https://example.com/1",
             },
             {
                 "global_event_id": 2,
-                "sql_date": 20260307,
-                "date_added": 20260307130000,
+                "sql_date": today,
+                "date_added": today_added,
                 "action_geo_country_code": "US",
                 "event_root_code": "14",
                 "source_url": "https://example.com/2",
             },
             {
                 "global_event_id": 3,
-                "sql_date": 20260306,
-                "date_added": 20260306110000,
+                "sql_date": yesterday,
+                "date_added": yesterday_added,
                 "action_geo_country_code": "CH",
                 "event_root_code": "19",
                 "source_url": "https://example.com/3",
@@ -62,7 +71,7 @@ async def test_sync_job_writes_sync_state(db_session):
     # Verify SyncState was written
     sync_state = await get_latest_sync_state(db_session)
     assert sync_state is not None
-    assert sync_state.latest_sqldate == 20260307
+    assert sync_state.latest_sqldate == today
     assert sync_state.sync_status == "success"
     assert sync_state.top_countries is not None
     assert len(sync_state.top_countries) == 2

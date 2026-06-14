@@ -1,7 +1,7 @@
 # LinkedIn copy — GDELT News Backend
 
 Positioning: **AI / LLM Engineer**. Pick the version that fits where you're posting.
-Replace `<repo-url>` with the public GitHub link before publishing.
+Replace `https://github.com/DavideLAbbate/EarthSignals-GDLET-News-module` with the public GitHub link before publishing.
 
 ---
 
@@ -19,7 +19,7 @@ Sotto c'è la parte di data engineering che rende tutto possibile: ingestion dai
 
 Cosa mi porto a casa: integrare LLM in produzione non è "chiamare un'API". È caching, validazione, retry, idempotenza, cost-awareness e graceful degradation.
 
-Codice + write-up architetturale completo qui 👉 <repo-url>
+Codice + write-up architetturale completo qui 👉 https://github.com/DavideLAbbate/EarthSignals-GDLET-News-module
 
 #Python #FastAPI #LLM #AI #MachineLearning #Anthropic #Ollama #DataEngineering #BackendDevelopment
 
@@ -29,7 +29,7 @@ Codice + write-up architetturale completo qui 👉 <repo-url>
 
 **GDELT News Backend — Applied LLM / FastAPI**
 Backend Python/FastAPI che trasforma il feed news GDELT 2.0 in storie arricchite da LLM. Design a due modelli: Anthropic Claude per la normalizzazione dei filtri in linguaggio naturale (cache, retry, output validato) e un LLM locale (Ollama) per la sintesi multi-articolo (titolo, sommario, entità). Include una pipeline di clustering basata su grafo su tre layer GDELT, scheduler async, PostgreSQL + SQLAlchemy async, Docker, CI e suite di test completa.
-🔗 <repo-url>
+🔗 https://github.com/DavideLAbbate/EarthSignals-GDLET-News-module
 
 ---
 
@@ -47,7 +47,7 @@ Underneath sits the data engineering that makes it work: ingestion from GDELT's 
 
 Biggest takeaway: shipping LLMs to production isn't "calling an API." It's caching, validation, retries, idempotency, cost-awareness and graceful degradation.
 
-Code + full architecture write-up 👉 <repo-url>
+Code + full architecture write-up 👉 https://github.com/DavideLAbbate/EarthSignals-GDLET-News-module
 
 #Python #FastAPI #LLM #AI #MachineLearning #Anthropic #Ollama #DataEngineering #BackendDevelopment
 
@@ -57,4 +57,4 @@ Code + full architecture write-up 👉 <repo-url>
 
 **GDELT News Backend — Applied LLM / FastAPI**
 Python/FastAPI backend that turns the GDELT 2.0 news feed into LLM-enriched stories. Dual-model design: Anthropic Claude for natural-language filter normalization (caching, retries, validated output) and a local LLM (Ollama) for multi-article synthesis (title, summary, entities). Features a graph-based clustering pipeline across three GDELT layers, async scheduling, PostgreSQL + async SQLAlchemy, Docker, CI and a full test suite.
-🔗 <repo-url>
+🔗 https://github.com/DavideLAbbate/EarthSignals-GDLET-News-module

@@ -1,5 +1,4 @@
-<!-- Replace YOUR_GH_USERNAME/YOUR_REPO below once the repo is on GitHub so the CI badge resolves. -->
-![CI](https://github.com/YOUR_GH_USERNAME/YOUR_REPO/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/DavideLAbbate/EarthSignals-GDLET-News-module/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.11+-blue.svg)
 ![FastAPI](https://img.shields.io/badge/FastAPI-async-009688.svg)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)
@@ -145,8 +144,8 @@ The design rationale (idempotency, cross-run continuity, failure modes) lives in
 **Prerequisites:** Docker + Docker Compose, and an [Anthropic API key](https://console.anthropic.com/). No cloud data warehouse or service account is required — ingestion pulls directly from GDELT's public HTTP server.
 
 ```bash
-git clone <repo-url>
-cd web-journal-news-module
+git clone https://github.com/DavideLAbbate/EarthSignals-GDLET-News-module.git
+cd EarthSignals-GDLET-News-module
 cp .env.example .env        # then edit ANTHROPIC_API_KEY and API_KEY
 docker-compose up --build
 ```

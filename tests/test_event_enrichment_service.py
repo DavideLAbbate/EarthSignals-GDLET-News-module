@@ -154,7 +154,7 @@ async def test_run_event_enrichment_batch_processes_rows_independently(
     assert events[2234567890123].enrichment_error is None
 
     assert events[2234567890124].enrichment_status == "failed"
-    assert events[2234567890124].enrichment_error == "missing source_url"
+    assert events[2234567890124].enrichment_error == "no fetchable URL (no mention_identifiers, no source_url)"
 
     assert events[2234567890125].enrichment_status == "failed"
     assert events[2234567890125].enrichment_error == "extract failed"
@@ -179,7 +179,7 @@ async def test_run_event_enrichment_batch_counts_missing_source_url_as_failed(
     event = result.scalar_one()
 
     assert event.enrichment_status == "failed"
-    assert event.enrichment_error == "missing source_url"
+    assert event.enrichment_error == "no fetchable URL (no mention_identifiers, no source_url)"
 
 
 @pytest.mark.asyncio
@@ -209,7 +209,7 @@ async def test_run_event_enrichment_batch_logs_when_missing_source_url_failure_u
     logger_mock.error.assert_called_once_with(
         "event_enrichment_failure_persistence_failed",
         global_event_id=2234567890124,
-        error_message="missing source_url",
+        error_message="no fetchable URL (no mention_identifiers, no source_url)",
         persistence_error="failure update returned no rows",
     )
 

@@ -1394,7 +1394,7 @@ async def test_validate_materialized_consistency_fails_on_duplicate_cluster_ids(
         await service._validate_materialized_consistency()
 
 
-async def test_validate_materialized_consistency_fails_on_missing_soft_link(db_session) -> None:
+async def test_validate_materialized_consistency_heals_dangling_soft_link(db_session) -> None:
     service = ClusterService(db_session)
     now = datetime(2026, 3, 24, tzinfo=UTC)
     db_session.add(
@@ -1414,8 +1414,21 @@ async def test_validate_materialized_consistency_fails_on_missing_soft_link(db_s
     )
     await db_session.commit()
 
-    with pytest.raises(ClusterBuildError):
-        await service._validate_materialized_consistency()
+    # Heal-and-continue: a dangling soft link (pointing at a cluster that no longer
+    # exists) no longer aborts the run with ClusterBuildError. The component is
+    # healed by marking it stale so the run can proceed.
+    await service._validate_materialized_consistency()
+
+    component = (
+        (
+            await db_session.execute(
+                select(ClusterComponent).where(ClusterComponent.component_id == "component-1")
+            )
+        )
+        .scalars()
+        .one()
+    )
+    assert component.status == "stale"
 
 
 async def test_build_and_materialise_persists_no_gkg_component_state(db_session, mocker) -> None:
