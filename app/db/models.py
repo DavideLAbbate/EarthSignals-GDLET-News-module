@@ -260,9 +260,7 @@ class StoryCluster(Base):
     main_topics: Mapped[list | None] = mapped_column(JSON, nullable=True)
     keywords: Mapped[list | None] = mapped_column(JSON, nullable=True)
     entities: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    enrichment_status: Mapped[str] = mapped_column(
-        String(20), nullable=False, default="pending"
-    )
+    enrichment_status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
     enriched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     enrichment_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -331,9 +329,7 @@ class RootCluster(Base):
     main_topics: Mapped[list | None] = mapped_column(JSON, nullable=True)
     keywords: Mapped[list | None] = mapped_column(JSON, nullable=True)
     entities: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    enrichment_status: Mapped[str] = mapped_column(
-        String(20), nullable=False, default="pending"
-    )
+    enrichment_status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
     enriched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     enrichment_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 

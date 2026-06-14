@@ -36,11 +36,17 @@ _COOLDOWN_MINUTES = 1  # enrichment is slow; prevent accidental hammering
 async def manual_enrich_trigger(
     date_from: Annotated[
         int | None,
-        Query(description="Earliest event date (YYYYMMDD). Only enrich clusters on or after this date.", example=20260313),
+        Query(
+            description="Earliest event date (YYYYMMDD). Only enrich clusters on or after this date.",
+            example=20260313,
+        ),
     ] = None,
     date_to: Annotated[
         int | None,
-        Query(description="Latest event date (YYYYMMDD). Only enrich clusters on or before this date.", example=20260313),
+        Query(
+            description="Latest event date (YYYYMMDD). Only enrich clusters on or before this date.",
+            example=20260313,
+        ),
     ] = None,
     _: str = Depends(verify_api_key),
 ) -> dict:

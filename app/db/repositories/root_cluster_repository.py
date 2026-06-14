@@ -17,7 +17,9 @@ _MAX_PG_ARGS = 32_767
 _ROOT_CLUSTER_COLUMNS = len(RootCluster.__table__.columns) - 1
 
 
-def _json_contains(q, column, value: str, table_name: str, col_name: str, bind_key: str, dialect: str):
+def _json_contains(
+    q, column, value: str, table_name: str, col_name: str, bind_key: str, dialect: str
+):
     """Return query with a JSON-array-contains filter applied (dialect-aware)."""
     if dialect == "postgresql":
         from sqlalchemy.dialects.postgresql import JSONB
@@ -152,33 +154,63 @@ class RootClusterRepository:
         _tbl = "root_clusters"
         if country_code is not None:
             q = _json_contains(
-                q, RootCluster.dominant_countries, country_code,
-                _tbl, "dominant_countries", "cc", dialect_name,
+                q,
+                RootCluster.dominant_countries,
+                country_code,
+                _tbl,
+                "dominant_countries",
+                "cc",
+                dialect_name,
             )
         if event_type is not None:
             q = _json_contains(
-                q, RootCluster.dominant_event_types, event_type,
-                _tbl, "dominant_event_types", "et", dialect_name,
+                q,
+                RootCluster.dominant_event_types,
+                event_type,
+                _tbl,
+                "dominant_event_types",
+                "et",
+                dialect_name,
             )
         if quad_class is not None:
             q = _json_contains(
-                q, RootCluster.dominant_quad_classes, quad_class,
-                _tbl, "dominant_quad_classes", "qc", dialect_name,
+                q,
+                RootCluster.dominant_quad_classes,
+                quad_class,
+                _tbl,
+                "dominant_quad_classes",
+                "qc",
+                dialect_name,
             )
         if theme is not None:
             q = _json_contains(
-                q, RootCluster.themes, theme,
-                _tbl, "themes", "th", dialect_name,
+                q,
+                RootCluster.themes,
+                theme,
+                _tbl,
+                "themes",
+                "th",
+                dialect_name,
             )
         if keyword is not None:
             q = _json_contains(
-                q, RootCluster.keywords, keyword,
-                _tbl, "keywords", "kw", dialect_name,
+                q,
+                RootCluster.keywords,
+                keyword,
+                _tbl,
+                "keywords",
+                "kw",
+                dialect_name,
             )
         if topic is not None:
             q = _json_contains(
-                q, RootCluster.main_topics, topic,
-                _tbl, "main_topics", "tp", dialect_name,
+                q,
+                RootCluster.main_topics,
+                topic,
+                _tbl,
+                "main_topics",
+                "tp",
+                dialect_name,
             )
 
         count_q = select(func.count()).select_from(q.with_only_columns(RootCluster.id).subquery())

@@ -100,7 +100,9 @@ async def run_cluster_enrichment_batch(
             if not urls_to_try:
                 logger.warning("cluster_enrichment_no_urls", cluster_id=cluster_id)
                 await _mark_failed(
-                    session, model, cluster_id,
+                    session,
+                    model,
+                    cluster_id,
                     error="no fetchable URL (no mention_identifiers, no source_url)",
                 )
                 summary["failed"] += 1

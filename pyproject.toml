@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "gdelt-news-backend"
 version = "1.0.0"
-description = "Production FastAPI backend for locally cached GDELT 2.0 events with Anthropic filter normalization"
+description = "FastAPI backend that ingests GDELT 2.0 HTTP exports, normalizes natural-language filters with Anthropic Claude, and enriches event clusters via a local LLM microservice"
 requires-python = ">=3.11"
 
 dependencies = [
@@ -47,6 +47,7 @@ dev = [
     "httpx==0.28.1",
     "anyio==4.7.0",
     "aiosqlite==0.22.1",
+    "ruff==0.15.5",
 ]
 
 [tool.hatch.build.targets.wheel]

@@ -33,58 +33,102 @@ MinScore = Annotated[
 ]
 MinEventCount = Annotated[
     int | None,
-    Query(ge=1, description="Return only clusters with at least this many GDELT events.", example=5),
+    Query(
+        ge=1, description="Return only clusters with at least this many GDELT events.", example=5
+    ),
 ]
 MinMentions = Annotated[
     int | None,
-    Query(ge=1, description="Return only clusters with at least this many document mentions.", example=50),
+    Query(
+        ge=1,
+        description="Return only clusters with at least this many document mentions.",
+        example=50,
+    ),
 ]
 CountryCode = Annotated[
     str | None,
-    Query(max_length=2, description="ISO 3166-1 alpha-2 country code. Filters on dominant_countries.", example="US"),
+    Query(
+        max_length=2,
+        description="ISO 3166-1 alpha-2 country code. Filters on dominant_countries.",
+        example="US",
+    ),
 ]
 DateFrom = Annotated[
     int | None,
-    Query(description="Earliest event date (YYYYMMDD, inclusive). Filters on event_date_ref_start.", example=20240301),
+    Query(
+        description="Earliest event date (YYYYMMDD, inclusive). Filters on event_date_ref_start.",
+        example=20240301,
+    ),
 ]
 DateTo = Annotated[
     int | None,
-    Query(description="Latest event date (YYYYMMDD, inclusive). Filters on event_date_ref_end.", example=20240331),
+    Query(
+        description="Latest event date (YYYYMMDD, inclusive). Filters on event_date_ref_end.",
+        example=20240331,
+    ),
 ]
 MentionedAfter = Annotated[
     datetime | None,
-    Query(description="Return only clusters whose first_mention_at >= this ISO-8601 timestamp. Use this to filter by when the story first appeared in the news.", example="2024-03-15T00:00:00Z"),
+    Query(
+        description="Return only clusters whose first_mention_at >= this ISO-8601 timestamp. Use this to filter by when the story first appeared in the news.",
+        example="2024-03-15T00:00:00Z",
+    ),
 ]
 MentionedBefore = Annotated[
     datetime | None,
-    Query(description="Return only clusters whose last_mention_at <= this ISO-8601 timestamp.", example="2024-03-16T23:59:59Z"),
+    Query(
+        description="Return only clusters whose last_mention_at <= this ISO-8601 timestamp.",
+        example="2024-03-16T23:59:59Z",
+    ),
 ]
 EnrichmentStatusFilter = Annotated[
     str | None,
-    Query(description="Filter by LLM enrichment state: pending | processing | success | failed.", example="success"),
+    Query(
+        description="Filter by LLM enrichment state: pending | processing | success | failed.",
+        example="success",
+    ),
 ]
 EventType = Annotated[
     str | None,
-    Query(description="Filter clusters where dominant_event_types contains this GDELT root event code.", example="PROTEST"),
+    Query(
+        description="Filter clusters where dominant_event_types contains this GDELT root event code.",
+        example="PROTEST",
+    ),
 ]
 QuadClass = Annotated[
     str | None,
-    Query(description="Filter clusters where dominant_quad_classes contains this value (1=Verbal Coop … 4=Material Conflict).", example="3"),
+    Query(
+        description="Filter clusters where dominant_quad_classes contains this value (1=Verbal Coop … 4=Material Conflict).",
+        example="3",
+    ),
 ]
 Theme = Annotated[
     str | None,
-    Query(description="Filter clusters where GKG themes contains this value (case-sensitive GDELT theme code).", example="HUMAN_RIGHTS"),
+    Query(
+        description="Filter clusters where GKG themes contains this value (case-sensitive GDELT theme code).",
+        example="HUMAN_RIGHTS",
+    ),
 ]
 Keyword = Annotated[
     str | None,
-    Query(description="Filter clusters where LLM keywords contains this value. Effective only for enrichment_status=success clusters.", example="sanctions"),
+    Query(
+        description="Filter clusters where LLM keywords contains this value. Effective only for enrichment_status=success clusters.",
+        example="sanctions",
+    ),
 ]
 Topic = Annotated[
     str | None,
-    Query(description="Filter clusters where LLM main_topics contains this value. Effective only for enrichment_status=success clusters.", example="Armed Conflict"),
+    Query(
+        description="Filter clusters where LLM main_topics contains this value. Effective only for enrichment_status=success clusters.",
+        example="Armed Conflict",
+    ),
 ]
-Limit = Annotated[int, Query(ge=1, le=500, description="Maximum number of clusters to return.", example=20)]
-Offset = Annotated[int, Query(ge=0, description="Number of clusters to skip (for pagination).", example=0)]
+Limit = Annotated[
+    int, Query(ge=1, le=500, description="Maximum number of clusters to return.", example=20)
+]
+Offset = Annotated[
+    int, Query(ge=0, description="Number of clusters to skip (for pagination).", example=0)
+]
 
 
 def _map_cluster(cluster) -> StoryClusterResponse:

@@ -499,17 +499,13 @@ def _sorted_unique_union(group: list[dict[str, Any]], field: str) -> list[str]:
     return sorted({v for c in group for v in (c.get(field) or []) if v})
 
 
-def _frequency_capped_union(
-    group: list[dict[str, Any]], field: str, cap: int
-) -> list[str]:
+def _frequency_capped_union(group: list[dict[str, Any]], field: str, cap: int) -> list[str]:
     """Union a GKG list field across clusters, rank by cross-cluster occurrence count, cap.
 
     Each value is counted once per sub-cluster that contains it (not per document),
     approximating document-frequency consensus across the merged group.
     """
-    counts: Counter[str] = Counter(
-        v for c in group for v in (c.get(field) or []) if v
-    )
+    counts: Counter[str] = Counter(v for c in group for v in (c.get(field) or []) if v)
     ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
     return [v for v, _ in ranked[:cap]]
 

@@ -1191,10 +1191,7 @@ def _top_gkg_values(gkg_rows: list[Any], field: str, cap: int) -> list[str]:
     alphabetically for deterministic output.
     """
     counts: Counter[str] = Counter(
-        item
-        for row in gkg_rows
-        for item in (getattr(row, field) or [])
-        if item
+        item for row in gkg_rows for item in (getattr(row, field) or []) if item
     )
     ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
     return [v for v, _ in ranked[:cap]]

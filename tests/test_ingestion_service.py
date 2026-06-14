@@ -905,31 +905,43 @@ async def test_run_retention_cleanup(db_session):
     await db_session.commit()
 
     mentions_repo = MentionsRepository(db_session)
-    await mentions_repo.bulk_upsert([
-        {
-            "global_event_id": 1234567890123,
-            "event_time_date": old_dateadded,
-            "mention_time_date": old_dateadded,
-            "mention_type": 1,
-            "mention_source_name": "old-source",
-            "mention_identifier": "https://example.com/old-article",
-        },
-        {
-            "global_event_id": 1234567890124,
-            "event_time_date": recent_dateadded,
-            "mention_time_date": recent_dateadded,
-            "mention_type": 1,
-            "mention_source_name": "recent-source",
-            "mention_identifier": "https://example.com/recent-article",
-        },
-    ])
+    await mentions_repo.bulk_upsert(
+        [
+            {
+                "global_event_id": 1234567890123,
+                "event_time_date": old_dateadded,
+                "mention_time_date": old_dateadded,
+                "mention_type": 1,
+                "mention_source_name": "old-source",
+                "mention_identifier": "https://example.com/old-article",
+            },
+            {
+                "global_event_id": 1234567890124,
+                "event_time_date": recent_dateadded,
+                "mention_time_date": recent_dateadded,
+                "mention_type": 1,
+                "mention_source_name": "recent-source",
+                "mention_identifier": "https://example.com/recent-article",
+            },
+        ]
+    )
     await db_session.commit()
 
     gkg_repo = GkgRepository(db_session)
-    await gkg_repo.bulk_upsert([
-        {"document_identifier": "https://example.com/old-article", "date": old_dateadded, "themes": []},
-        {"document_identifier": "https://example.com/recent-article", "date": recent_dateadded, "themes": []},
-    ])
+    await gkg_repo.bulk_upsert(
+        [
+            {
+                "document_identifier": "https://example.com/old-article",
+                "date": old_dateadded,
+                "themes": [],
+            },
+            {
+                "document_identifier": "https://example.com/recent-article",
+                "date": recent_dateadded,
+                "themes": [],
+            },
+        ]
+    )
     await db_session.commit()
 
     with patch.object(ingestion_service, "get_settings") as mock_settings:
